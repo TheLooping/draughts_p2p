@@ -1,0 +1,15 @@
+# Build artifacts
+build/
+
+# Generated configs, runtime outputs
+config/generated/
+run/
+logs/
+neighbors/
+
+# Logs and outputs
+*.log
+*.out
+
+# OS files
+.DS_Store
