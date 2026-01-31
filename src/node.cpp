@@ -29,6 +29,10 @@ std::string overlay_key(const address_v4& addr, uint16_t port) {
     return addr.to_string() + ":" + std::to_string(port);
 }
 
+std::string draughts_key(const address_v4& addr, uint16_t port) {
+    return addr.to_string() + ":" + std::to_string(port);
+}
+
 std::string peer_to_string(const proto::PeerDescriptor& d) {
     auto addr = addr_from_bytes(d.ip);
     std::ostringstream oss;
@@ -249,6 +253,16 @@ std::optional<proto::PeerDescriptor> DraughtsNode::lookup_peer_by_ipv4(const boo
     return std::nullopt;
 }
 
+std::optional<proto::PeerDescriptor> DraughtsNode::lookup_peer_by_draughts_endpoint(
+    const boost::asio::ip::address_v4& addr, uint16_t port) const {
+    if (port == 0) return std::nullopt;
+    auto it = draughts_addr_to_peer_id_.find(draughts_key(addr, port));
+    if (it == draughts_addr_to_peer_id_.end()) return std::nullopt;
+    auto pit = directory_.find(it->second);
+    if (pit == directory_.end()) return std::nullopt;
+    return pit->second;
+}
+
 // ------------------- UDP receive/send -------------------
 
 void DraughtsNode::do_receive() {
@@ -312,6 +326,9 @@ void DraughtsNode::learn_peer(const proto::PeerDescriptor& d) {
     if (d.peer_id == self_.peer_id) return;
     directory_[d.peer_id] = d;
     addr_to_peer_id_[overlay_key(addr_from_bytes(d.ip), d.overlay_port)] = d.peer_id;
+    if (d.draughts_port != 0) {
+        draughts_addr_to_peer_id_[draughts_key(addr_from_bytes(d.ip), d.draughts_port)] = d.peer_id;
+    }
     views_.insert_passive(d);
 }
 

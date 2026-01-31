@@ -83,7 +83,7 @@ Notes:
 help                         show help
 id                           show local peer id / endpoint
 neighbors                    show active neighbors
-send <ipv4> <text>            send request to responder IPv4
+send <ipv4:port> <text>       send request to responder endpoint
 inbox                        list received messages
 requests                     list pending responder sessions
 reply <session_hex> <text>    reply to a received request
@@ -95,10 +95,11 @@ quit                          exit
 ## Draughts packet layout (1280 bytes)
 
 ```
-PK_PH_tmp (64) | PK_PPH_tmp (64) | PK_Init_tmp (64) | ADDR_NNH (4) |
-C_ADDR_Resp (4) | C_ADDR_Init (4) | x (8) | magic (8) | session_id (16) | C_Data (1044)
+PK_PH_tmp (64) | PK_PPH_tmp (64) | PK_Init_tmp (64) | ADDR_NNH (6) |
+C_ADDR_Resp (6) | C_ADDR_Init (6) | x (8) | magic (8) | session_id (16) | C_Data (1038)
 ```
 
+- `ADDR_NNH`, `C_ADDR_Resp`, `C_ADDR_Init` are **IPv4(4 bytes) + port(2 bytes)**.
 - `PK_PH_tmp` is the per-hop public key; it is **0xEE..EE** only in the three exit phases.
 - `C_Data` is end-to-end encrypted with `PK_Init_tmp` and responder/initiator keys.
 

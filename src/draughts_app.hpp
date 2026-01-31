@@ -32,7 +32,7 @@ public:
     void stop();
 
     // CLI actions
-    void cmd_send(const std::string& dest_ipv4, const std::string& text);
+    void cmd_send(const std::string& dest, const std::string& text);
     void cmd_inbox();
     void cmd_requests();
     void cmd_reply(const std::string& session_hex, const std::string& text);
@@ -53,6 +53,7 @@ private:
         draughts::crypto::PubKey pk_pph_tmp;
         draughts::crypto::PubKey pk_init_tmp;
         boost::asio::ip::address_v4 addr_nnh;
+        uint16_t port_nnh = 0;
         std::array<std::uint8_t, draughts::kAddrSize> c_addr_init{};
         uint64_t created_ms = 0;
     };
@@ -100,20 +101,28 @@ private:
                      uint16_t& nh_port,
                      draughts::crypto::PubKey& nh_pub,
                      boost::asio::ip::address_v4& nnh_addr,
+                     uint16_t& nnh_port,
                      draughts::crypto::PubKey& nnh_pub,
                      const std::string& exclude_peer_id);
     bool pick_nnh_for_peer_id(const std::string& nh_peer_id,
                               const std::string& exclude_peer_id,
                               boost::asio::ip::address_v4& nnh_addr,
+                              uint16_t& nnh_port,
                               draughts::crypto::PubKey& nnh_pub);
 
     static std::string session_hex(const std::string& sid);
     static std::string bytes_to_hex(const uint8_t* data, size_t len);
 
     static std::string addr_to_string(const boost::asio::ip::address_v4& addr);
+    static std::string endpoint_to_string(const boost::asio::ip::address_v4& addr, uint16_t port);
     static bool addr_from_string(const std::string& s, boost::asio::ip::address_v4& out);
-    static void addr_to_bytes(const boost::asio::ip::address_v4& addr, std::uint8_t out_bytes[draughts::kAddrSize]);
-    static bool bytes_to_addr(const std::uint8_t in_bytes[draughts::kAddrSize], boost::asio::ip::address_v4& out);
+    static bool endpoint_from_string(const std::string& s, boost::asio::ip::address_v4& out, uint16_t& port);
+    static void addr_to_bytes(const boost::asio::ip::address_v4& addr,
+                              uint16_t port,
+                              std::uint8_t out_bytes[draughts::kAddrSize]);
+    static bool bytes_to_addr(const std::uint8_t in_bytes[draughts::kAddrSize],
+                              boost::asio::ip::address_v4& out,
+                              uint16_t& port);
 
     static std::string session_id_from_bytes(const std::uint8_t bytes[draughts::kSessionIdSize]);
     void random_session_id(std::uint8_t out[draughts::kSessionIdSize]);
@@ -121,10 +130,9 @@ private:
     static void encode_payload(const std::string& text, std::uint8_t out[draughts::kDataSize]);
     static bool decode_payload(const std::uint8_t in[draughts::kDataSize], std::string& text);
 
-    bool get_peer_pubkey_by_addr(const boost::asio::ip::address_v4& addr,
-                                 draughts::crypto::PubKey& out_pubkey) const;
-    bool get_peer_draughts_port_by_addr(const boost::asio::ip::address_v4& addr,
-                                        uint16_t& out_port) const;
+    bool get_peer_pubkey_by_endpoint(const boost::asio::ip::address_v4& addr,
+                                     uint16_t port,
+                                     draughts::crypto::PubKey& out_pubkey) const;
 
     void prune_sessions();
 

@@ -144,20 +144,21 @@ void DraughtsApp::stop() {
     t_housekeeping_.cancel();
 }
 
-void DraughtsApp::cmd_send(const std::string& dest_ipv4, const std::string& text) {
-    if (dest_ipv4.empty() || text.empty()) {
-        console_.println("usage: send <ipv4> <text>");
+void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
+    if (dest.empty() || text.empty()) {
+        console_.println("usage: send <ipv4:port> <text>");
         return;
     }
 
     address_v4 resp_addr;
-    if (!addr_from_string(dest_ipv4, resp_addr)) {
-        console_.println("invalid ipv4 address: " + dest_ipv4);
+    uint16_t resp_port = 0;
+    if (!endpoint_from_string(dest, resp_addr, resp_port)) {
+        console_.println("invalid responder endpoint: " + dest);
         return;
     }
 
     draughts::crypto::PubKey resp_pub{};
-    if (!get_peer_pubkey_by_addr(resp_addr, resp_pub)) {
+    if (!get_peer_pubkey_by_endpoint(resp_addr, resp_port, resp_pub)) {
         console_.println("responder not found in neighbor directory; wait for overlay sync");
         return;
     }
@@ -166,8 +167,9 @@ void DraughtsApp::cmd_send(const std::string& dest_ipv4, const std::string& text
     uint16_t nh_port = 0;
     draughts::crypto::PubKey nh_pub{};
     address_v4 nnh_addr;
+    uint16_t nnh_port = 0;
     draughts::crypto::PubKey nnh_pub{};
-    if (!pick_nh_nnh(nh_addr, nh_port, nh_pub, nnh_addr, nnh_pub, "")) {
+    if (!pick_nh_nnh(nh_addr, nh_port, nh_pub, nnh_addr, nnh_port, nnh_pub, "")) {
         console_.println("no active neighbors to start random walk");
         return;
     }
@@ -189,9 +191,9 @@ void DraughtsApp::cmd_send(const std::string& dest_ipv4, const std::string& text
     std::memcpy(p.params.pk_init_tmp, init_pub.data(), draughts::kPkSize);
 
     // Addresses
-    addr_to_bytes(nnh_addr, p.params.addr_nnh);
-    addr_to_bytes(resp_addr, p.params.c_addr_resp);
-    addr_to_bytes(address_v4::from_string(cfg_.bind_ip), p.params.c_addr_init);
+    addr_to_bytes(nnh_addr, nnh_port, p.params.addr_nnh);
+    addr_to_bytes(resp_addr, resp_port, p.params.c_addr_resp);
+    addr_to_bytes(address_v4::from_string(cfg_.bind_ip), cfg_.draughts_port, p.params.c_addr_init);
 
     // Layering rules for c_addr_resp / c_addr_init.
     if (!transform_addr_layer(p.params.c_addr_resp, ph_tmp, nh_pub)) {
@@ -232,7 +234,7 @@ void DraughtsApp::cmd_send(const std::string& dest_ipv4, const std::string& text
         return;
     }
 
-    console_.println("sent session=" + session_hex(sid) + " to responder=" + dest_ipv4);
+    console_.println("sent session=" + session_hex(sid) + " to responder=" + endpoint_to_string(resp_addr, resp_port));
 }
 
 void DraughtsApp::cmd_inbox() {
@@ -285,7 +287,7 @@ void DraughtsApp::cmd_reply(const std::string& session_hex_in, const std::string
         console_.println("unknown session id");
         return;
     }
-    if (value.addr_nnh.is_unspecified()) {
+    if (value.addr_nnh.is_unspecified() || value.port_nnh == 0) {
         console_.println("session missing nnh address; cannot reply");
         return;
     }
@@ -294,7 +296,7 @@ void DraughtsApp::cmd_reply(const std::string& session_hex_in, const std::string
     draughts::fill_exit_pk(p.pk_ph_tmp);
     std::memcpy(p.params.pk_pph_tmp, value.pk_pph_tmp.data(), draughts::kPkSize);
     std::memcpy(p.params.pk_init_tmp, value.pk_init_tmp.data(), draughts::kPkSize);
-    addr_to_bytes(value.addr_nnh, p.params.addr_nnh);
+    addr_to_bytes(value.addr_nnh, value.port_nnh, p.params.addr_nnh);
     std::memcpy(p.params.c_addr_init, value.c_addr_init.data(), draughts::kAddrSize);
 
     draughts::crypto::PubKey pk_init{};
@@ -425,43 +427,45 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
         value.port_ph = from.port();
         std::memcpy(value.pk_pph_tmp.data(), p.params.pk_pph_tmp, draughts::kPkSize);
         std::memcpy(value.pk_init_tmp.data(), p.params.pk_init_tmp, draughts::kPkSize);
-        if (!bytes_to_addr(p.params.addr_nnh, value.addr_nnh)) {
+        if (!bytes_to_addr(p.params.addr_nnh, value.addr_nnh, value.port_nnh)) {
             value.addr_nnh = address_v4::any();
+            value.port_nnh = 0;
         }
         std::memcpy(value.c_addr_init.data(), p.params.c_addr_init, draughts::kAddrSize);
         value.created_ms = now_ms();
         responder_lru_.insert_head(sid, value);
 
-        inbox_.push_back(InboxItem{false, session_hex(sid), text, addr_to_string(from.address().to_v4())});
-        console_.println("[REQUEST] session=" + session_hex(sid) + " from=" + addr_to_string(from.address().to_v4())
+        inbox_.push_back(InboxItem{false, session_hex(sid), text, endpoint_to_string(from.address().to_v4(), from.port())});
+        console_.println("[REQUEST] session=" + session_hex(sid) + " from=" + endpoint_to_string(from.address().to_v4(), from.port())
                          + " text=\"" + text + "\"");
         return;
     }
 
     if (approx_eq(x, -2.0)) {
         address_v4 nh_addr;
-        if (!bytes_to_addr(p.params.addr_nnh, nh_addr) || draughts::is_zero_addr(p.params.addr_nnh)) {
+        uint16_t nh_port = 0;
+        if (!bytes_to_addr(p.params.addr_nnh, nh_addr, nh_port) || draughts::is_zero_addr(p.params.addr_nnh)) {
             logger_.warn("invalid next hop for response bootstrap");
             return;
         }
         draughts::crypto::PubKey nh_pub{};
-        uint16_t nh_port = 0;
-        if (!get_peer_pubkey_by_addr(nh_addr, nh_pub) || !get_peer_draughts_port_by_addr(nh_addr, nh_port)) {
+        if (nh_port == 0 || !get_peer_pubkey_by_endpoint(nh_addr, nh_port, nh_pub)) {
             logger_.warn("next hop info not found for response bootstrap");
             return;
         }
 
         std::string exclude_peer_id;
-        auto from_desc = node_.lookup_peer_by_ipv4(from.address().to_v4());
+        auto from_desc = node_.lookup_peer_by_draughts_endpoint(from.address().to_v4(), from.port());
         if (from_desc) exclude_peer_id = from_desc->peer_id;
 
         std::string nh_peer_id;
-        auto nh_desc = node_.lookup_peer_by_ipv4(nh_addr);
+        auto nh_desc = node_.lookup_peer_by_draughts_endpoint(nh_addr, nh_port);
         if (nh_desc) nh_peer_id = nh_desc->peer_id;
 
         address_v4 nnh_addr;
+        uint16_t nnh_port = 0;
         draughts::crypto::PubKey nnh_pub{};
-        if (!pick_nnh_for_peer_id(nh_peer_id, exclude_peer_id, nnh_addr, nnh_pub)) {
+        if (!pick_nnh_for_peer_id(nh_peer_id, exclude_peer_id, nnh_addr, nnh_port, nnh_pub)) {
             logger_.warn("failed to pick nnh for response bootstrap");
             return;
         }
@@ -472,7 +476,7 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
         }
 
         p.params.x = cfg_.ciplc_x0;
-        addr_to_bytes(nnh_addr, p.params.addr_nnh);
+        addr_to_bytes(nnh_addr, nnh_port, p.params.addr_nnh);
 
         draughts::crypto::Sm2KeyPair ph_tmp;
         auto ph_pub = ph_tmp.public_key_raw();
@@ -512,13 +516,14 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
         }
 
         address_v4 responder_addr;
-        if (!bytes_to_addr(p.params.c_addr_resp, responder_addr) || draughts::is_zero_addr(p.params.c_addr_resp)) {
+        uint16_t responder_port = 0;
+        if (!bytes_to_addr(p.params.c_addr_resp, responder_addr, responder_port) ||
+            draughts::is_zero_addr(p.params.c_addr_resp)) {
             logger_.warn("invalid responder address at outnode");
             return;
         }
-        uint16_t responder_port = 0;
-        if (!get_peer_draughts_port_by_addr(responder_addr, responder_port)) {
-            logger_.warn("responder port not found at outnode");
+        if (responder_port == 0) {
+            logger_.warn("responder port missing at outnode");
             return;
         }
 
@@ -531,7 +536,8 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
 
     bool can_continue = !draughts::is_zero_addr(p.params.addr_nnh);
     address_v4 nh_addr;
-    if (can_continue && !bytes_to_addr(p.params.addr_nnh, nh_addr)) {
+    uint16_t nh_port = 0;
+    if (can_continue && !bytes_to_addr(p.params.addr_nnh, nh_addr, nh_port)) {
         can_continue = false;
     }
 
@@ -541,28 +547,24 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     p.params.x = ciplc.x;
 
     std::string exclude_peer_id;
-    auto from_desc = node_.lookup_peer_by_ipv4(from.address().to_v4());
+    auto from_desc = node_.lookup_peer_by_draughts_endpoint(from.address().to_v4(), from.port());
     if (from_desc) exclude_peer_id = from_desc->peer_id;
 
     if (do_continue) {
         draughts::crypto::PubKey nh_pub{};
-        if (!get_peer_pubkey_by_addr(nh_addr, nh_pub)) {
+        if (nh_port == 0 || !get_peer_pubkey_by_endpoint(nh_addr, nh_port, nh_pub)) {
             logger_.warn("next hop pubkey not found; dropping");
-            return;
-        }
-        uint16_t nh_port = 0;
-        if (!get_peer_draughts_port_by_addr(nh_addr, nh_port)) {
-            logger_.warn("next hop port not found; dropping");
             return;
         }
 
         std::string nh_peer_id;
-        auto nh_desc = node_.lookup_peer_by_ipv4(nh_addr);
+        auto nh_desc = node_.lookup_peer_by_draughts_endpoint(nh_addr, nh_port);
         if (nh_desc) nh_peer_id = nh_desc->peer_id;
 
         address_v4 nnh_addr;
+        uint16_t nnh_port = 0;
         draughts::crypto::PubKey nnh_pub{};
-        if (!pick_nnh_for_peer_id(nh_peer_id, exclude_peer_id, nnh_addr, nnh_pub)) {
+        if (!pick_nnh_for_peer_id(nh_peer_id, exclude_peer_id, nnh_addr, nnh_port, nnh_pub)) {
             logger_.warn("failed to pick nnh for relay");
             return;
         }
@@ -581,7 +583,7 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
             logger_.warn("failed to add layer to c_addr_resp at relay");
             return;
         }
-        addr_to_bytes(nnh_addr, p.params.addr_nnh);
+        addr_to_bytes(nnh_addr, nnh_port, p.params.addr_nnh);
 
         std::array<uint8_t, draughts::kPkSize> old_ph{};
         std::memcpy(old_ph.data(), p.pk_ph_tmp, draughts::kPkSize);
@@ -606,10 +608,10 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     std::string outnode_peer_id;
     bool outnode_ok = false;
     if (can_continue && !draughts::is_zero_addr(p.params.addr_nnh)) {
-        if (get_peer_pubkey_by_addr(nh_addr, outnode_pub) &&
-            get_peer_draughts_port_by_addr(nh_addr, outnode_port)) {
+        if (nh_port != 0 && get_peer_pubkey_by_endpoint(nh_addr, nh_port, outnode_pub)) {
             outnode_addr = nh_addr;
-            auto nh_desc = node_.lookup_peer_by_ipv4(nh_addr);
+            outnode_port = nh_port;
+            auto nh_desc = node_.lookup_peer_by_draughts_endpoint(nh_addr, nh_port);
             if (nh_desc) outnode_peer_id = nh_desc->peer_id;
             outnode_ok = true;
         }
@@ -622,7 +624,7 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
         }
         outnode_addr = addr_from_bytes(nh_desc->ip);
         outnode_port = nh_desc->draughts_port;
-        if (!get_peer_pubkey_by_addr(outnode_addr, outnode_pub)) {
+        if (!get_peer_pubkey_by_endpoint(outnode_addr, outnode_port, outnode_pub)) {
             logger_.warn("outnode pubkey not found");
             return;
         }
@@ -635,8 +637,9 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     }
 
     address_v4 nnh_addr;
+    uint16_t nnh_port = 0;
     draughts::crypto::PubKey nnh_pub{};
-    if (!pick_nnh_for_peer_id(outnode_peer_id, exclude_peer_id, nnh_addr, nnh_pub)) {
+    if (!pick_nnh_for_peer_id(outnode_peer_id, exclude_peer_id, nnh_addr, nnh_port, nnh_pub)) {
         logger_.warn("failed to pick nnh for outnode leg");
         return;
     }
@@ -657,7 +660,7 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     }
 
     p.params.x = 0.0;
-    addr_to_bytes(nnh_addr, p.params.addr_nnh);
+    addr_to_bytes(nnh_addr, nnh_port, p.params.addr_nnh);
 
     std::array<uint8_t, draughts::kPkSize> old_ph{};
     std::memcpy(old_ph.data(), p.pk_ph_tmp, draughts::kPkSize);
@@ -711,6 +714,7 @@ bool DraughtsApp::pick_nh_nnh(address_v4& nh_addr,
                               uint16_t& nh_port,
                               draughts::crypto::PubKey& nh_pub,
                               address_v4& nnh_addr,
+                              uint16_t& nnh_port,
                               draughts::crypto::PubKey& nnh_pub,
                               const std::string& exclude_peer_id) {
     auto nh_desc = node_.pick_random_active_except(exclude_peer_id);
@@ -719,14 +723,15 @@ bool DraughtsApp::pick_nh_nnh(address_v4& nh_addr,
     nh_port = nh_desc->draughts_port;
     if (nh_port == 0) return false;
 
-    if (!get_peer_pubkey_by_addr(nh_addr, nh_pub)) return false;
+    if (!get_peer_pubkey_by_endpoint(nh_addr, nh_port, nh_pub)) return false;
 
-    return pick_nnh_for_peer_id(nh_desc->peer_id, exclude_peer_id, nnh_addr, nnh_pub);
+    return pick_nnh_for_peer_id(nh_desc->peer_id, exclude_peer_id, nnh_addr, nnh_port, nnh_pub);
 }
 
 bool DraughtsApp::pick_nnh_for_peer_id(const std::string& nh_peer_id,
                                        const std::string& exclude_peer_id,
                                        address_v4& nnh_addr,
+                                       uint16_t& nnh_port,
                                        draughts::crypto::PubKey& nnh_pub) {
     bool nnh_ok = false;
     if (!nh_peer_id.empty()) {
@@ -735,7 +740,8 @@ bool DraughtsApp::pick_nnh_for_peer_id(const std::string& nh_peer_id,
             auto nnh_desc = node_.lookup_peer(*nnh_id);
             if (nnh_desc) {
                 nnh_addr = addr_from_bytes(nnh_desc->ip);
-                nnh_ok = true;
+                nnh_port = nnh_desc->draughts_port;
+                nnh_ok = (nnh_port != 0);
             }
         }
     }
@@ -752,12 +758,13 @@ bool DraughtsApp::pick_nnh_for_peer_id(const std::string& nh_peer_id,
             std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
             auto pick = candidates[dist(rng_)];
             nnh_addr = addr_from_bytes(pick.ip);
-            nnh_ok = true;
+            nnh_port = pick.draughts_port;
+            nnh_ok = (nnh_port != 0);
         }
     }
 
     if (!nnh_ok) return false;
-    if (!get_peer_pubkey_by_addr(nnh_addr, nnh_pub)) return false;
+    if (!get_peer_pubkey_by_endpoint(nnh_addr, nnh_port, nnh_pub)) return false;
     return true;
 }
 
@@ -778,6 +785,10 @@ std::string DraughtsApp::addr_to_string(const address_v4& addr) {
     return addr.to_string();
 }
 
+std::string DraughtsApp::endpoint_to_string(const address_v4& addr, uint16_t port) {
+    return addr.to_string() + ":" + std::to_string(port);
+}
+
 bool DraughtsApp::addr_from_string(const std::string& s, address_v4& out) {
     boost::system::error_code ec;
     auto addr = address_v4::from_string(s, ec);
@@ -786,15 +797,40 @@ bool DraughtsApp::addr_from_string(const std::string& s, address_v4& out) {
     return true;
 }
 
-void DraughtsApp::addr_to_bytes(const address_v4& addr, std::uint8_t out_bytes[draughts::kAddrSize]) {
-    auto bytes = addr.to_bytes();
-    std::memcpy(out_bytes, bytes.data(), draughts::kAddrSize);
+bool DraughtsApp::endpoint_from_string(const std::string& s, address_v4& out, uint16_t& port) {
+    auto pos = s.rfind(':');
+    if (pos == std::string::npos) return false;
+    auto ip = s.substr(0, pos);
+    auto ps = s.substr(pos + 1);
+    if (ip.empty() || ps.empty()) return false;
+    if (!addr_from_string(ip, out)) return false;
+    int port_i = 0;
+    try {
+        port_i = std::stoi(ps);
+    } catch (...) {
+        return false;
+    }
+    if (port_i <= 0 || port_i > 65535) return false;
+    port = static_cast<uint16_t>(port_i);
+    return true;
 }
 
-bool DraughtsApp::bytes_to_addr(const std::uint8_t in_bytes[draughts::kAddrSize], address_v4& out) {
+void DraughtsApp::addr_to_bytes(const address_v4& addr,
+                                uint16_t port,
+                                std::uint8_t out_bytes[draughts::kAddrSize]) {
+    auto bytes = addr.to_bytes();
+    std::memcpy(out_bytes, bytes.data(), 4);
+    out_bytes[4] = static_cast<uint8_t>((port >> 8) & 0xFF);
+    out_bytes[5] = static_cast<uint8_t>(port & 0xFF);
+}
+
+bool DraughtsApp::bytes_to_addr(const std::uint8_t in_bytes[draughts::kAddrSize],
+                                address_v4& out,
+                                uint16_t& port) {
     address_v4::bytes_type bytes{};
-    std::memcpy(bytes.data(), in_bytes, draughts::kAddrSize);
+    std::memcpy(bytes.data(), in_bytes, 4);
     out = address_v4(bytes);
+    port = (static_cast<uint16_t>(in_bytes[4]) << 8) | static_cast<uint16_t>(in_bytes[5]);
     return true;
 }
 
@@ -826,9 +862,11 @@ bool DraughtsApp::decode_payload(const std::uint8_t in[draughts::kDataSize], std
     return true;
 }
 
-bool DraughtsApp::get_peer_pubkey_by_addr(const address_v4& addr,
-                                          draughts::crypto::PubKey& out_pubkey) const {
-    auto desc = node_.lookup_peer_by_ipv4(addr);
+bool DraughtsApp::get_peer_pubkey_by_endpoint(const address_v4& addr,
+                                              uint16_t port,
+                                              draughts::crypto::PubKey& out_pubkey) const {
+    if (port == 0) return false;
+    auto desc = node_.lookup_peer_by_draughts_endpoint(addr, port);
     if (!desc) return false;
     if (desc->pubkey.empty()) return false;
     std::vector<uint8_t> raw;
@@ -839,15 +877,6 @@ bool DraughtsApp::get_peer_pubkey_by_addr(const address_v4& addr,
     }
     if (raw.size() != draughts::kPkSize) return false;
     std::memcpy(out_pubkey.data(), raw.data(), draughts::kPkSize);
-    return true;
-}
-
-bool DraughtsApp::get_peer_draughts_port_by_addr(const address_v4& addr,
-                                                 uint16_t& out_port) const {
-    auto desc = node_.lookup_peer_by_ipv4(addr);
-    if (!desc) return false;
-    if (desc->draughts_port == 0) return false;
-    out_port = desc->draughts_port;
     return true;
 }
 

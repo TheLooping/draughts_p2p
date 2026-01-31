@@ -9,9 +9,9 @@ namespace draughts {
 
 static constexpr std::size_t kPacketSize = 1280;
 static constexpr std::size_t kPkSize = 64;
-static constexpr std::size_t kAddrSize = 4;
+static constexpr std::size_t kAddrSize = 6; // IPv4 (4) + port (2)
 static constexpr std::size_t kSessionIdSize = 16;
-static constexpr std::size_t kDataSize = 1044;
+static constexpr std::size_t kDataSize = 1038;
 
 #pragma pack(push, 1)
 struct DraughtsParams {
@@ -32,7 +32,7 @@ struct DraughtsPacket {
 };
 #pragma pack(pop)
 
-static_assert(sizeof(DraughtsParams) == 156, "DraughtsParams size mismatch");
+static_assert(sizeof(DraughtsParams) == 162, "DraughtsParams size mismatch");
 static_assert(sizeof(DraughtsPacket) == kPacketSize, "DraughtsPacket size mismatch");
 
 inline bool is_exit_pk(const std::uint8_t pk[kPkSize]) {

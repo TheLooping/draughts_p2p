@@ -36,6 +36,8 @@ public:
     std::vector<proto::PeerDescriptor> active_neighbors() const;
     std::optional<proto::PeerDescriptor> lookup_peer(const std::string& peer_id) const;
     std::optional<proto::PeerDescriptor> lookup_peer_by_ipv4(const boost::asio::ip::address_v4& addr) const;
+    std::optional<proto::PeerDescriptor> lookup_peer_by_draughts_endpoint(const boost::asio::ip::address_v4& addr,
+                                                                          uint16_t port) const;
     std::optional<proto::PeerDescriptor> pick_random_active_except(const std::string& exclude_peer_id) const;
     std::optional<std::string> pick_nnh_for(const std::string& nh_peer_id,
                                            const std::string& exclude_peer_id) const;
@@ -112,6 +114,7 @@ private:
     // Directories
     std::unordered_map<std::string, proto::PeerDescriptor> directory_;
     std::unordered_map<std::string, std::string> addr_to_peer_id_;
+    std::unordered_map<std::string, std::string> draughts_addr_to_peer_id_;
 
     // Two-hop cache (neighbor -> its active neighbors)
     std::unordered_map<std::string, TwoHopEntry> twohop_;
