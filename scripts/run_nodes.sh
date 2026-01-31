@@ -7,10 +7,12 @@ RUN_DIR="run"
 SEED_COUNT=0
 SEED_DELAY=1
 SKIP_LIST=""
+ONLY_LIST=""
+INTERVAL=5
 
 usage() {
   cat <<EOF
-Usage: $0 [--configs-dir DIR] [--binary PATH] [--run-dir DIR] [--seed-count N] [--seed-delay SEC] [--skip name1,name2]
+Usage: $0 [--configs-dir DIR] [--binary PATH] [--run-dir DIR] [--seed-count N] [--seed-delay SEC] [--skip name1,name2] [--only name1,name2] [--interval SEC]
 EOF
 }
 
@@ -22,6 +24,8 @@ while [[ $# -gt 0 ]]; do
     --seed-count) SEED_COUNT="$2"; shift 2 ;;
     --seed-delay) SEED_DELAY="$2"; shift 2 ;;
     --skip) SKIP_LIST="$2"; shift 2 ;;
+    --only) ONLY_LIST="$2"; shift 2 ;;
+    --interval) INTERVAL="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown arg: $1" >&2; usage; exit 1 ;;
   esac
@@ -44,6 +48,15 @@ for item in "${SKIP_ITEMS[@]}"; do
   SKIP["$item"]=1
 done
 
+declare -A ONLY
+if [[ -n "$ONLY_LIST" ]]; then
+  IFS=',' read -ra ONLY_ITEMS <<< "$ONLY_LIST"
+  for item in "${ONLY_ITEMS[@]}"; do
+    [[ -z "$item" ]] && continue
+    ONLY["$item"]=1
+  done
+fi
+
 shopt -s nullglob
 configs=("$CONFIGS_DIR"/*.conf)
 if [[ ${#configs[@]} -eq 0 ]]; then
@@ -55,6 +68,11 @@ filtered=()
 for cfg in "${configs[@]}"; do
   base=$(basename "$cfg")
   base_no_ext=$(basename "$cfg" .conf)
+  if [[ ${#ONLY[@]} -gt 0 ]]; then
+    if [[ -z "${ONLY[$base]+x}" && -z "${ONLY[$base_no_ext]+x}" ]]; then
+      continue
+    fi
+  fi
   if [[ -n "${SKIP[$base]+x}" || -n "${SKIP[$base_no_ext]+x}" ]]; then
     continue
   fi
@@ -79,17 +97,17 @@ start_cfg() {
 if [[ "$SEED_COUNT" -gt 0 ]]; then
   for ((i=0; i<SEED_COUNT && i<${#filtered[@]}; i++)); do
     start_cfg "${filtered[$i]}"
-    sleep 0.05
+    [[ "$INTERVAL" != "0" ]] && sleep "$INTERVAL"
   done
   sleep "$SEED_DELAY"
   for ((i=SEED_COUNT; i<${#filtered[@]}; i++)); do
     start_cfg "${filtered[$i]}"
-    sleep 0.05
+    [[ "$INTERVAL" != "0" ]] && sleep "$INTERVAL"
   done
 else
   for cfg in "${filtered[@]}"; do
     start_cfg "$cfg"
-    sleep 0.05
+    [[ "$INTERVAL" != "0" ]] && sleep "$INTERVAL"
   done
 fi
 

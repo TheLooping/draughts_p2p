@@ -64,6 +64,8 @@ bool load_config(const std::string& path, Config& out, std::string& err) {
                 out.cli_enabled = b;
             }
             else if (key == "active_neighbors_file") out.active_neighbors_file = val;
+            else if (key == "self_info_file") out.self_info_file = val;
+            else if (key == "peer_info_dir") out.peer_info_dir = val;
 
             else if (key == "active_min") out.active_min = static_cast<size_t>(std::stoul(val));
             else if (key == "active_max") out.active_max = static_cast<size_t>(std::stoul(val));

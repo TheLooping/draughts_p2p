@@ -13,6 +13,8 @@ log_file = {log_file}
 log_level = {log_level}
 cli_enabled = {cli_enabled}
 active_neighbors_file = {neighbors_file}
+self_info_file = {self_info_file}
+peer_info_dir = {peer_info_dir}
 
 # HyParView parameters
 active_min = {active_min}
@@ -49,14 +51,16 @@ app_pad_to = {app_pad_to}
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Generate draughts_p2p config files for multiple nodes.")
-    p.add_argument("--count", type=int, default=10, help="number of nodes to generate")
+    p.add_argument("--count", type=int, default=36, help="number of nodes to generate")
     p.add_argument("--bind-ip", default="127.0.0.1", help="IPv4 bind address shared by all nodes")
     p.add_argument("--overlay-base", type=int, default=4000, help="base overlay port")
     p.add_argument("--draughts-base", type=int, default=5000, help="base draughts port")
     p.add_argument("--out-dir", default="config/generated", help="output config directory")
     p.add_argument("--log-dir", default="logs", help="log directory")
     p.add_argument("--neighbors-dir", default="neighbors", help="active neighbor file directory")
-    p.add_argument("--cli-count", type=int, default=4, help="how many nodes enable CLI")
+    p.add_argument("--peer-info-dir", default="peers", help="self info file directory")
+    p.add_argument("--cli-count", type=int, default=0, help="how many nodes enable CLI (ignored if --cli-nodes set)")
+    p.add_argument("--cli-nodes", default="10,20", help="comma-separated node indices to enable CLI")
     p.add_argument("--bootstrap-count", type=int, default=3, help="how many seed nodes to include as bootstraps")
     p.add_argument("--active-min", type=int, default=4, help="minimum active neighbors")
     p.add_argument("--active-max", type=int, default=8, help="maximum active neighbors")
@@ -74,9 +78,11 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     log_dir = Path(args.log_dir)
     neighbors_dir = Path(args.neighbors_dir)
+    peer_info_dir = Path(args.peer_info_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
     neighbors_dir.mkdir(parents=True, exist_ok=True)
+    peer_info_dir.mkdir(parents=True, exist_ok=True)
 
     seed_count = min(args.bootstrap_count, args.count)
     seeds = [
@@ -84,13 +90,28 @@ def main() -> None:
         for i in range(seed_count)
     ]
 
+    cli_nodes = set()
+    if args.cli_nodes:
+        for item in args.cli_nodes.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                cli_nodes.add(int(item))
+            except ValueError:
+                continue
+
     for i in range(1, args.count + 1):
         peer_id = f"node{i}"
         overlay_port = args.overlay_base + (i - 1)
         draughts_port = args.draughts_base + (i - 1)
-        cli_enabled = "true" if i <= args.cli_count else "false"
+        if cli_nodes:
+            cli_enabled = "true" if i in cli_nodes else "false"
+        else:
+            cli_enabled = "true" if i <= args.cli_count else "false"
         log_file = log_dir / f"{peer_id}.log"
         neighbors_file = neighbors_dir / f"{peer_id}.json"
+        self_info_file = peer_info_dir / f"{peer_id}.info"
 
         bootstraps = []
         if i > 1:
@@ -112,6 +133,8 @@ def main() -> None:
             log_level="info",
             cli_enabled=cli_enabled,
             neighbors_file=neighbors_file.as_posix(),
+            self_info_file=self_info_file.as_posix(),
+            peer_info_dir=peer_info_dir.as_posix(),
             active_min=args.active_min,
             active_max=args.active_max,
             passive_max=args.passive_max,

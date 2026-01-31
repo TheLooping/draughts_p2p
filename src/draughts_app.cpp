@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iomanip>
 #include <sstream>
@@ -39,6 +41,35 @@ bool transform_addr_layer(std::uint8_t addr[draughts::kAddrSize],
     auto key_iv = draughts::crypto::Sm2KeyPair::DeriveKeyAndIv(secret);
     crypto::CommutativeCipher::TransformInPlace(addr, draughts::kAddrSize, key_iv.first, key_iv.second);
     return true;
+}
+
+struct PeerInfoFile {
+    std::string peer_id;
+    std::string bind_ip;
+    uint16_t overlay_port = 0;
+    uint16_t draughts_port = 0;
+    std::string pubkey;
+};
+
+bool load_peer_info_file(const std::string& path, PeerInfoFile& out) {
+    std::ifstream in(path);
+    if (!in.is_open()) return false;
+    std::string line;
+    while (std::getline(in, line)) {
+        line = trim(line);
+        if (line.empty()) continue;
+        if (line[0] == '#') continue;
+        auto pos = line.find('=');
+        if (pos == std::string::npos) continue;
+        std::string key = trim(line.substr(0, pos));
+        std::string val = trim(line.substr(pos + 1));
+        if (key == "peer_id") out.peer_id = val;
+        else if (key == "bind_ip") out.bind_ip = val;
+        else if (key == "overlay_port") out.overlay_port = static_cast<uint16_t>(std::stoul(val));
+        else if (key == "draughts_port") out.draughts_port = static_cast<uint16_t>(std::stoul(val));
+        else if (key == "pubkey") out.pubkey = val;
+    }
+    return !out.peer_id.empty() && !out.bind_ip.empty() && out.draughts_port != 0 && !out.pubkey.empty();
 }
 
 } // namespace
@@ -146,20 +177,16 @@ void DraughtsApp::stop() {
 
 void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
     if (dest.empty() || text.empty()) {
-        console_.println("usage: send <ipv4:port> <text>");
+        console_.println("usage: send <peer_id|ipv4:port> <text>");
         return;
     }
 
     address_v4 resp_addr;
     uint16_t resp_port = 0;
-    if (!endpoint_from_string(dest, resp_addr, resp_port)) {
-        console_.println("invalid responder endpoint: " + dest);
-        return;
-    }
-
     draughts::crypto::PubKey resp_pub{};
-    if (!get_peer_pubkey_by_endpoint(resp_addr, resp_port, resp_pub)) {
-        console_.println("responder not found in neighbor directory; wait for overlay sync");
+    std::string resp_peer_id;
+    if (!resolve_peer_target(dest, resp_addr, resp_port, resp_pub, resp_peer_id)) {
+        console_.println("responder not found (need peer_id or ipv4:port with published info)");
         return;
     }
 
@@ -890,6 +917,86 @@ bool DraughtsApp::get_peer_pubkey_by_endpoint(const address_v4& addr,
     if (raw.size() != draughts::kPkSize) return false;
     std::memcpy(out_pubkey.data(), raw.data(), draughts::kPkSize);
     return true;
+}
+
+bool DraughtsApp::resolve_peer_target(const std::string& dest,
+                                      address_v4& out_addr,
+                                      uint16_t& out_port,
+                                      draughts::crypto::PubKey& out_pubkey,
+                                      std::string& out_peer_id) const {
+    address_v4 addr;
+    uint16_t port = 0;
+    if (endpoint_from_string(dest, addr, port)) {
+        if (get_peer_pubkey_by_endpoint(addr, port, out_pubkey)) {
+            out_addr = addr;
+            out_port = port;
+            auto desc = node_.lookup_peer_by_draughts_endpoint(addr, port);
+            if (desc) out_peer_id = desc->peer_id;
+            return true;
+        }
+        if (!cfg_.peer_info_dir.empty()) {
+            namespace fs = std::filesystem;
+            for (const auto& entry : fs::directory_iterator(cfg_.peer_info_dir)) {
+                if (!entry.is_regular_file()) continue;
+                PeerInfoFile info;
+                if (!load_peer_info_file(entry.path().string(), info)) continue;
+                if (info.bind_ip.empty() || info.draughts_port == 0) continue;
+                if (info.bind_ip == addr.to_string() && info.draughts_port == port) {
+                    std::vector<uint8_t> raw;
+                    try {
+                        raw = b64::decode(info.pubkey);
+                    } catch (...) {
+                        return false;
+                    }
+                    if (raw.size() != draughts::kPkSize) return false;
+                    std::memcpy(out_pubkey.data(), raw.data(), draughts::kPkSize);
+                    out_addr = addr;
+                    out_port = port;
+                    out_peer_id = info.peer_id;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Treat as peer_id
+    out_peer_id = dest;
+    auto desc = node_.lookup_peer(dest);
+    if (desc && desc->draughts_port != 0 && !desc->pubkey.empty()) {
+        out_addr = addr_from_bytes(desc->ip);
+        out_port = desc->draughts_port;
+        std::vector<uint8_t> raw;
+        try {
+            raw = b64::decode(desc->pubkey);
+        } catch (...) {
+            return false;
+        }
+        if (raw.size() != draughts::kPkSize) return false;
+        std::memcpy(out_pubkey.data(), raw.data(), draughts::kPkSize);
+        return true;
+    }
+    if (!cfg_.peer_info_dir.empty()) {
+        std::string path = cfg_.peer_info_dir + "/" + dest + ".info";
+        PeerInfoFile info;
+        if (load_peer_info_file(path, info)) {
+            boost::system::error_code ec;
+            auto addr2 = address_v4::from_string(info.bind_ip, ec);
+            if (ec) return false;
+            std::vector<uint8_t> raw;
+            try {
+                raw = b64::decode(info.pubkey);
+            } catch (...) {
+                return false;
+            }
+            if (raw.size() != draughts::kPkSize) return false;
+            std::memcpy(out_pubkey.data(), raw.data(), draughts::kPkSize);
+            out_addr = addr2;
+            out_port = info.draughts_port;
+            return true;
+        }
+    }
+    return false;
 }
 
 void DraughtsApp::prune_sessions() {

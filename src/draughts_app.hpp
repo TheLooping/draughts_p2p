@@ -133,6 +133,11 @@ private:
     bool get_peer_pubkey_by_endpoint(const boost::asio::ip::address_v4& addr,
                                      uint16_t port,
                                      draughts::crypto::PubKey& out_pubkey) const;
+    bool resolve_peer_target(const std::string& dest,
+                             boost::asio::ip::address_v4& out_addr,
+                             uint16_t& out_port,
+                             draughts::crypto::PubKey& out_pubkey,
+                             std::string& out_peer_id) const;
 
     void prune_sessions();
 

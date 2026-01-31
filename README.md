@@ -41,8 +41,10 @@ Edit `config/default.conf` for each node and run with the config file path:
 Useful config options for multi-node experiments:
 - `cli_enabled` (true/false): disable CLI on headless relay nodes.
 - `active_neighbors_file`: path to a JSON file with current active neighbors (overwritten on update, deleted on exit).
+- `self_info_file`: path to a per-node info file (addr/ports/pubkey) for external lookup.
+- `peer_info_dir`: directory containing peer info files for CLI resolution.
 
-### Experiment: 60 nodes on one server (2 CLI)
+### Experiment: 36 nodes on one server (CLI on node10/node20)
 
 Clean old artifacts:
 ```bash
@@ -51,24 +53,23 @@ Clean old artifacts:
 
 Generate configs:
 ```bash
-./scripts/gen_configs.py \
-  --count 60 \
-  --cli-count 2 \
-  --active-min 3 \
-  --active-max 5 \
-  --neighbor-set-k 5 \
-  --bind-ip 127.0.0.1
+./scripts/gen_configs.py --count 36 --cli-nodes 10,20 --active-min 3 --active-max 5 --neighbor-set-k 5 --bind-ip 127.0.0.1
 ```
 
-Start CLI nodes in separate terminals (do this first so seed nodes are up):
+Start seed nodes one by one (every 5s):
 ```bash
-./build/draughts_node config/generated/node1.conf
-./build/draughts_node config/generated/node2.conf
+./scripts/run_nodes.sh --only node1,node2,node3 --interval 5
 ```
 
-Then start 58 relay nodes (skip CLI nodes, start seeds first):
+Start CLI nodes in separate terminals:
 ```bash
-./scripts/run_nodes.sh --seed-count 3 --seed-delay 1 --skip node1,node2
+./build/draughts_node config/generated/node10.conf
+./build/draughts_node config/generated/node20.conf
+```
+
+Then start remaining relay nodes one by one (every 5s):
+```bash
+./scripts/run_nodes.sh --skip node1,node2,node3,node10,node20 --interval 5
 ```
 
 Start topology collector and sender:
@@ -123,7 +124,7 @@ Notes:
 help                         show help
 id                           show local peer id / endpoint
 neighbors                    show active neighbors
-send <ipv4:port> <text>       send request to responder endpoint
+send <peer_id|ipv4:port> <text> send request to responder
 inbox                        list received messages
 requests                     list pending responder sessions
 reply <session_hex> <text>    reply to a received request

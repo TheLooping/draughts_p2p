@@ -76,6 +76,8 @@ private:
     void tick_housekeeping();
     void update_active_neighbors_file(bool force);
     void remove_active_neighbors_file();
+    void write_self_info_file();
+    void remove_self_info_file();
 
     // Overlay handlers
     void handle_join(uint64_t nonce, const tlv::Bytes& payload, const udp::endpoint& from);

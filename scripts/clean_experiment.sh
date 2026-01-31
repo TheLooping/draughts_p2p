@@ -8,6 +8,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 rm -rf "$ROOT/run" \
        "$ROOT/logs" \
        "$ROOT/neighbors" \
+       "$ROOT/peers" \
        "$ROOT/config/generated" \
        "$ROOT/topology_state.json" \
        "$ROOT/topology_matrix.csv"

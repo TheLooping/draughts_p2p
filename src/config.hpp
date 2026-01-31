@@ -17,6 +17,8 @@ struct Config {
     std::string log_level = "info";
     bool cli_enabled = true;
     std::string active_neighbors_file;
+    std::string self_info_file;
+    std::string peer_info_dir;
 
     // HyParView view sizes
     size_t active_min = 4;

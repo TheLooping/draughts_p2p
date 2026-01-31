@@ -31,7 +31,7 @@ static void print_help(Console& c) {
     c.println("  peers                        show known peers (directory)");
     c.println("  inbox                        list received messages");
     c.println("  requests                     list pending responder sessions");
-    c.println("  send <ipv4:port> <text>       send message to responder endpoint");
+    c.println("  send <peer_id|ipv4:port> <text> send message to responder");
     c.println("  reply <session_hex> <text>    reply to a received request");
     c.println("  quit                          exit");
 }
@@ -106,7 +106,7 @@ void Cli::run() {
             std::getline(iss, rest);
             rest = trim_ws(rest);
             if (ipv4.empty() || rest.empty()) {
-                console_.println("usage: send <ipv4:port> <text>");
+                console_.println("usage: send <peer_id|ipv4:port> <text>");
                 continue;
             }
             boost::asio::post(io_, [this, ipv4, rest]{ app_.cmd_send(ipv4, rest); });

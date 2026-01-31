@@ -6,6 +6,7 @@ config/generated/
 run/
 logs/
 neighbors/
+peers/
 
 # Logs and outputs
 *.log

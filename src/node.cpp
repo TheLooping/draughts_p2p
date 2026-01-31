@@ -134,6 +134,7 @@ void DraughtsNode::start() {
 
     logger_.info("node start peer_id=" + self_.peer_id + " bind=" + peer_to_string(self_));
 
+    write_self_info_file();
     update_active_neighbors_file(true);
     do_receive();
 
@@ -158,6 +159,7 @@ void DraughtsNode::start() {
 
 void DraughtsNode::stop() {
     logger_.info("stop requested");
+    remove_self_info_file();
     remove_active_neighbors_file();
     boost::system::error_code ec;
     sock_.close(ec);
@@ -568,6 +570,35 @@ void DraughtsNode::remove_active_neighbors_file() {
     if (cfg_.active_neighbors_file.empty()) return;
     std::remove(cfg_.active_neighbors_file.c_str());
     neighbors_snapshot_.clear();
+}
+
+void DraughtsNode::write_self_info_file() {
+    if (cfg_.self_info_file.empty()) return;
+    std::ostringstream oss;
+    oss << "peer_id = " << self_.peer_id << "\n";
+    oss << "bind_ip = " << cfg_.bind_ip << "\n";
+    oss << "overlay_port = " << self_.overlay_port << "\n";
+    oss << "draughts_port = " << self_.draughts_port << "\n";
+    oss << "pubkey = " << self_.pubkey << "\n";
+
+    std::string tmp = cfg_.self_info_file + ".tmp";
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        logger_.warn("failed to open self info file: " + cfg_.self_info_file);
+        return;
+    }
+    out << oss.str();
+    out.close();
+    if (std::rename(tmp.c_str(), cfg_.self_info_file.c_str()) != 0) {
+        logger_.warn("failed to rename self info file: " + cfg_.self_info_file);
+        return;
+    }
+    logger_.info("published self info: " + cfg_.self_info_file);
+}
+
+void DraughtsNode::remove_self_info_file() {
+    if (cfg_.self_info_file.empty()) return;
+    std::remove(cfg_.self_info_file.c_str());
 }
 
 // ------------------- Overlay logic -------------------
