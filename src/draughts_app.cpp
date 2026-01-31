@@ -228,8 +228,14 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
 
     initiator_session_ids_.insert(sid);
 
+    logger_.info("cli send request session=" + session_hex(sid) +
+                 " responder=" + endpoint_to_string(resp_addr, resp_port) +
+                 " nh=" + endpoint_to_string(nh_addr, nh_port) +
+                 " nnh=" + endpoint_to_string(nnh_addr, nnh_port));
+
     if (!send_packet_to(p, nh_addr, nh_port)) {
         console_.println("failed to send packet to next hop");
+        logger_.warn("cli send failed session=" + session_hex(sid));
         initiator_session_ids_.erase(sid);
         return;
     }
@@ -320,9 +326,12 @@ void DraughtsApp::cmd_reply(const std::string& session_hex_in, const std::string
 
     if (!send_packet_to(p, value.addr_ph, value.port_ph)) {
         console_.println("failed to send reply to out node");
+        logger_.warn("cli reply failed session=" + session_hex(sid));
         return;
     }
 
+    logger_.info("cli send reply session=" + session_hex(sid) +
+                 " outnode=" + endpoint_to_string(value.addr_ph, value.port_ph));
     console_.println("sent reply session=" + session_hex(sid) + " to out node");
 }
 
@@ -404,6 +413,7 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
                 return;
             }
 
+            logger_.info("recv reply session=" + session_hex(sid));
             inbox_.push_back(InboxItem{true, session_hex(sid), text, ""});
             console_.println("[REPLY] session=" + session_hex(sid) + " text=\"" + text + "\"");
             initiator_session_ids_.erase(it);
@@ -422,6 +432,8 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
             return;
         }
 
+        logger_.info("recv request session=" + session_hex(sid) +
+                     " from=" + endpoint_to_string(from.address().to_v4(), from.port()));
         ResponderValue value{};
         value.addr_ph = from.address().to_v4();
         value.port_ph = from.port();

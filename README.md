@@ -42,6 +42,46 @@ Useful config options for multi-node experiments:
 - `cli_enabled` (true/false): disable CLI on headless relay nodes.
 - `active_neighbors_file`: path to a JSON file with current active neighbors (overwritten on update, deleted on exit).
 
+### Experiment: 60 nodes on one server (2 CLI)
+
+Clean old artifacts:
+```bash
+./scripts/clean_experiment.sh
+```
+
+Generate configs:
+```bash
+./scripts/gen_configs.py \
+  --count 60 \
+  --cli-count 2 \
+  --active-min 3 \
+  --active-max 5 \
+  --neighbor-set-k 5 \
+  --bind-ip 127.0.0.1
+```
+
+Start CLI nodes in separate terminals (do this first so seed nodes are up):
+```bash
+./build/draughts_node config/generated/node1.conf
+./build/draughts_node config/generated/node2.conf
+```
+
+Then start 58 relay nodes (skip CLI nodes, start seeds first):
+```bash
+./scripts/run_nodes.sh --seed-count 3 --seed-delay 1 --skip node1,node2
+```
+
+Start topology collector and sender:
+```bash
+./scripts/topology_collector.py --bind 0.0.0.0 --port 9000
+./scripts/send_neighbors.py --dir neighbors --host 127.0.0.1 --port 9000 --interval 2
+```
+
+Stop all background relay nodes:
+```bash
+./scripts/stop_nodes.sh
+```
+
 Example: three nodes on localhost:
 
 Terminal A (`config/a.conf`)

@@ -58,6 +58,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--neighbors-dir", default="neighbors", help="active neighbor file directory")
     p.add_argument("--cli-count", type=int, default=4, help="how many nodes enable CLI")
     p.add_argument("--bootstrap-count", type=int, default=3, help="how many seed nodes to include as bootstraps")
+    p.add_argument("--active-min", type=int, default=4, help="minimum active neighbors")
+    p.add_argument("--active-max", type=int, default=8, help="maximum active neighbors")
+    p.add_argument("--passive-max", type=int, default=80, help="maximum passive neighbors")
+    p.add_argument("--neighbor-set-k", type=int, default=8, help="neighbors advertised in neighbor_set")
+    p.add_argument("--neighbor-set-every-ms", type=int, default=5000, help="neighbor_set interval in ms")
     return p.parse_args()
 
 
@@ -107,17 +112,17 @@ def main() -> None:
             log_level="info",
             cli_enabled=cli_enabled,
             neighbors_file=neighbors_file.as_posix(),
-            active_min=4,
-            active_max=8,
-            passive_max=80,
+            active_min=args.active_min,
+            active_max=args.active_max,
+            passive_max=args.passive_max,
             lease_ms=30000,
             keepalive_every_ms=10000,
             shuffle_every_ms=12000,
             repair_every_ms=2000,
             join_ttl=4,
             shuffle_k=8,
-            neighbor_set_every_ms=5000,
-            neighbor_set_k=8,
+            neighbor_set_every_ms=args.neighbor_set_every_ms,
+            neighbor_set_k=args.neighbor_set_k,
             ciplc_a=1.0,
             ciplc_b=0.1,
             ciplc_c=3.0,

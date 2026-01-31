@@ -2,6 +2,7 @@
 
 #include <boost/asio.hpp>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <string>
 #include <optional>
@@ -135,4 +136,5 @@ private:
 
     // Neighbor file tracking
     std::string neighbors_snapshot_;
+    std::unordered_set<std::string> active_neighbor_set_;
 };

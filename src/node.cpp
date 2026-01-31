@@ -498,26 +498,53 @@ void DraughtsNode::update_active_neighbors_file(bool force) {
     if (cfg_.active_neighbors_file.empty()) return;
     auto act = views_.active_descriptors();
 
+    std::unordered_set<std::string> current;
+    current.reserve(act.size());
+    for (const auto& d : act) {
+        current.insert(d.peer_id + "@" + peer_to_string(d));
+    }
+
+    bool changed = (current != active_neighbor_set_);
+    if (force || changed) {
+        for (const auto& k : current) {
+            if (active_neighbor_set_.find(k) == active_neighbor_set_.end()) {
+                logger_.info("active neighbor added: " + k);
+            }
+        }
+        for (const auto& k : active_neighbor_set_) {
+            if (current.find(k) == current.end()) {
+                logger_.info("active neighbor removed: " + k);
+            }
+        }
+        active_neighbor_set_ = std::move(current);
+    }
+
+    if (!force && !changed && !neighbors_snapshot_.empty()) return;
+
     std::ostringstream oss;
-    oss << "{";
-    oss << "\"peer_id\":\"" << json_escape(self_.peer_id) << "\",";
-    oss << "\"bind_ip\":\"" << json_escape(cfg_.bind_ip) << "\",";
-    oss << "\"overlay_port\":" << self_.overlay_port << ",";
-    oss << "\"draughts_port\":" << self_.draughts_port << ",";
-    oss << "\"timestamp_ms\":" << now_ms() << ",";
-    oss << "\"active_neighbors\":[";
+    oss << "{\n";
+    oss << "  \"peer_id\": \"" << json_escape(self_.peer_id) << "\",\n";
+    oss << "  \"bind_ip\": \"" << json_escape(cfg_.bind_ip) << "\",\n";
+    oss << "  \"overlay_port\": " << self_.overlay_port << ",\n";
+    oss << "  \"draughts_port\": " << self_.draughts_port << ",\n";
+    oss << "  \"pubkey\": \"" << json_escape(self_.pubkey) << "\",\n";
+    oss << "  \"timestamp_ms\": " << now_ms() << ",\n";
+    oss << "  \"active_neighbors\": [\n";
     for (size_t i = 0; i < act.size(); ++i) {
         const auto& d = act[i];
-        if (i > 0) oss << ",";
         auto ip = addr_from_bytes(d.ip).to_string();
-        oss << "{";
-        oss << "\"peer_id\":\"" << json_escape(d.peer_id) << "\",";
-        oss << "\"ip\":\"" << json_escape(ip) << "\",";
-        oss << "\"overlay_port\":" << d.overlay_port << ",";
-        oss << "\"draughts_port\":" << d.draughts_port;
-        oss << "}";
+        oss << "    {\n";
+        oss << "      \"peer_id\": \"" << json_escape(d.peer_id) << "\",\n";
+        oss << "      \"ip\": \"" << json_escape(ip) << "\",\n";
+        oss << "      \"overlay_port\": " << d.overlay_port << ",\n";
+        oss << "      \"draughts_port\": " << d.draughts_port << ",\n";
+        oss << "      \"pubkey\": \"" << json_escape(d.pubkey) << "\"\n";
+        oss << "    }";
+        if (i + 1 < act.size()) oss << ",";
+        oss << "\n";
     }
-    oss << "]}";
+    oss << "  ]\n";
+    oss << "}\n";
 
     std::string content = oss.str();
     if (!force && content == neighbors_snapshot_) return;
