@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log-dir", default="logs", help="log directory")
     p.add_argument("--neighbors-dir", default="neighbors", help="active neighbor file directory")
     p.add_argument("--peer-info-dir", default="peers", help="self info file directory")
-    p.add_argument("--keys-dir", default="keys", help="directory for SM2 keys")
+    p.add_argument("--keys-dir", default="keys", help="directory for EC P-256 keys")
     p.add_argument("--topology-dir", default="topology", help="directory for topology files")
     p.add_argument("--cli-count", type=int, default=0, help="how many nodes enable CLI (ignored if --cli-nodes set)")
     p.add_argument("--cli-nodes", default="10,20", help="comma-separated node indices to enable CLI")
@@ -205,7 +205,7 @@ def ensure_keypair(peer_id: str, keys_dir: Path, force: bool) -> Tuple[Path, str
     require_openssl()
     keys_dir.mkdir(parents=True, exist_ok=True)
     subprocess.run([
-        "openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:sm2",
+        "openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:prime256v1",
         "-out", str(priv_path)
     ], check=True)
     pub_b64 = extract_pubkey_raw_base64(priv_path)

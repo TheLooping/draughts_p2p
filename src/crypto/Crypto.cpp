@@ -55,8 +55,8 @@ EVP_PKEY* sm2_keypair_new() {
     std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)> guard(pctx, EVP_PKEY_CTX_free);
 
     if (EVP_PKEY_keygen_init(pctx) != 1) ThrowOpenSslError("EVP_PKEY_keygen_init");
-    if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx, NID_sm2) != 1) {
-        ThrowOpenSslError("EVP_PKEY_CTX_set_ec_paramgen_curve_nid(NID_sm2)");
+    if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx, NID_X9_62_prime256v1) != 1) {
+        ThrowOpenSslError("EVP_PKEY_CTX_set_ec_paramgen_curve_nid(prime256v1)");
     }
 
     EVP_PKEY* pkey = nullptr;
@@ -93,8 +93,8 @@ PubKey ec_pubkey_raw(const EVP_PKEY* pkey) {
 }
 
 EVP_PKEY* sm2_from_raw_pubkey(const PubKey& raw) {
-    std::unique_ptr<EC_KEY, decltype(&EC_KEY_free)> ec(EC_KEY_new_by_curve_name(NID_sm2), EC_KEY_free);
-    if (!ec) ThrowOpenSslError("EC_KEY_new_by_curve_name(NID_sm2)");
+    std::unique_ptr<EC_KEY, decltype(&EC_KEY_free)> ec(EC_KEY_new_by_curve_name(NID_X9_62_prime256v1), EC_KEY_free);
+    if (!ec) ThrowOpenSslError("EC_KEY_new_by_curve_name(prime256v1)");
 
     const EC_GROUP* group = EC_KEY_get0_group(ec.get());
     if (!group) ThrowOpenSslError("EC_KEY_get0_group");
@@ -215,7 +215,7 @@ std::pair<Key, Iv> Sm2KeyPair::DeriveKeyAndIv(const std::vector<Byte>& shared_se
     if (shared_secret.empty()) throw std::runtime_error("shared secret is empty");
     CheckSizeFitsInt(shared_secret.size(), "HKDF input size");
 
-    static const char kInfo[] = "Draughts-SM2-ECDH-AES-CTR";
+    static const char kInfo[] = "Draughts-EC-P256-ECDH-AES-CTR";
     std::array<Byte, kAesKeySize + kAesIvSize> okm;
 
     EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr);
@@ -255,54 +255,26 @@ Sm2KeyPair Sm2KeyPair::LoadFromPemFile(const std::string& path) {
     if (!pkey) ThrowOpenSslError("PEM_read_PrivateKey");
 
     int base_id = EVP_PKEY_base_id(pkey);
-    bool base_ok = (base_id == EVP_PKEY_EC);
-#ifdef EVP_PKEY_SM2
-    base_ok = base_ok || (base_id == EVP_PKEY_SM2);
-#endif
-    if (!base_ok) {
+    if (base_id != EVP_PKEY_EC) {
         EVP_PKEY_free(pkey);
-        throw std::runtime_error("private key is not EC/SM2: " + path);
+        throw std::runtime_error("private key is not EC (prime256v1): " + path);
     }
 
     const EC_KEY* ec = EVP_PKEY_get0_EC_KEY(pkey);
-    if (ec) {
-        const EC_GROUP* group = EC_KEY_get0_group(ec);
-        if (group) {
-            int nid = EC_GROUP_get_curve_name(group);
-            if (nid != NID_sm2) {
-                EVP_PKEY_free(pkey);
-                throw std::runtime_error("EC key is not SM2 curve: " + path);
-            }
-        }
-    }
-
-#ifdef EVP_PKEY_SM2
-    if (base_id == EVP_PKEY_SM2) {
-        if (!ec) {
-            EVP_PKEY_free(pkey);
-            ThrowOpenSslError("EVP_PKEY_get0_EC_KEY(sm2)");
-        }
-        EC_KEY* dup = EC_KEY_dup(ec);
-        if (!dup) {
-            EVP_PKEY_free(pkey);
-            ThrowOpenSslError("EC_KEY_dup(sm2)");
-        }
-        EVP_PKEY* ec_pkey = EVP_PKEY_new();
-        if (!ec_pkey) {
-            EC_KEY_free(dup);
-            EVP_PKEY_free(pkey);
-            ThrowOpenSslError("EVP_PKEY_new");
-        }
-        if (EVP_PKEY_assign_EC_KEY(ec_pkey, dup) != 1) {
-            EC_KEY_free(dup);
-            EVP_PKEY_free(ec_pkey);
-            EVP_PKEY_free(pkey);
-            ThrowOpenSslError("EVP_PKEY_assign_EC_KEY");
-        }
+    if (!ec) {
         EVP_PKEY_free(pkey);
-        pkey = ec_pkey;
+        ThrowOpenSslError("EVP_PKEY_get0_EC_KEY");
     }
-#endif
+    const EC_GROUP* group = EC_KEY_get0_group(ec);
+    if (!group) {
+        EVP_PKEY_free(pkey);
+        ThrowOpenSslError("EC_KEY_get0_group");
+    }
+    int nid = EC_GROUP_get_curve_name(group);
+    if (nid != NID_X9_62_prime256v1) {
+        EVP_PKEY_free(pkey);
+        throw std::runtime_error("EC key is not prime256v1: " + path);
+    }
 
     return Sm2KeyPair(PkeyPtr(pkey));
 }

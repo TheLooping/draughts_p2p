@@ -1,11 +1,11 @@
-# draughts_p2p（SM2 / HyParView / Draughts）
+# draughts_p2p（EC-P256 / HyParView / Draughts）
 
 本项目是 **Draughts 匿名路由协议** 在去中心化 P2P 覆盖网络上的 C++17 原型实现，包含：
 
 - **静态拓扑**：基于 **UDP/IPv4** 的预生成邻接关系（不再考虑动态加入）。
 - **两跳邻居同步**：用于局部 NNH 选择。
 - **Draughts 随机游走路由**：带 **CIPLC** 路径长度控制。
-- **匿名请求/响应**：使用 **SM2-ECDH + HKDF + AES-CTR XOR**。
+- **匿名请求/响应**：使用 **EC-P256 ECDH + HKDF + AES-CTR XOR**。
 - CLI 交互；内部日志写入文件。
 
 这是实验性原型，不适合直接用于对抗性互联网环境。
@@ -49,7 +49,7 @@ cmake --build . -j
 - `active_neighbors_file`：当前 active 邻居列表 JSON（覆盖写、退出时删除）。
 - `self_info_file`：节点自信息文件（地址/端口/公钥），供外部查询。
 - `peer_info_dir`：自信息文件目录，CLI 可用于解析 `peer_id`。
-- `identity_key_file`：SM2 私钥文件（PEM）。
+- `identity_key_file`：EC P-256 私钥文件（PEM）。
 - `static_topology`：是否启用静态拓扑（推荐 true）。
 - `topology_dir`：拓扑文件目录（每节点 `.neighbors`）。
 

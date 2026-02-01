@@ -15,8 +15,8 @@ namespace crypto {
 using Byte = unsigned char;
 static constexpr std::size_t kAesKeySize = 16;
 static constexpr std::size_t kAesIvSize = 16;
-static constexpr std::size_t kSm2CoordSize = 32;
-static constexpr std::size_t kSm2PubKeySize = 64; // X || Y
+static constexpr std::size_t kSm2CoordSize = 32;  // P-256 coordinate size
+static constexpr std::size_t kSm2PubKeySize = 64; // X || Y (P-256)
 
 using Key = std::array<Byte, kAesKeySize>;
 using Iv = std::array<Byte, kAesIvSize>;
