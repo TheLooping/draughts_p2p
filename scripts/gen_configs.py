@@ -93,10 +93,7 @@ def require_openssl() -> None:
         raise SystemExit(f"openssl not available: {e}")
 
 
-def extract_pubkey_raw_base64(priv_path: Path) -> str:
-    out = subprocess.check_output([
-        "openssl", "ec", "-in", str(priv_path), "-text", "-noout"
-    ], text=True)
+def _extract_pub_hex_from_text(out: str) -> str:
     pub_hex = ""
     in_pub = False
     for line in out.splitlines():
@@ -107,8 +104,89 @@ def extract_pubkey_raw_base64(priv_path: Path) -> str:
             if not line.startswith(" "):
                 break
             pub_hex += line.strip().replace(":", "")
+    return pub_hex
+
+
+def _extract_pubkey_from_der(der: bytes) -> bytes:
+    # Parse SubjectPublicKeyInfo and return raw uncompressed point (0x04 || X || Y).
+    i = 0
+    if not der or der[0] != 0x30:
+        raise RuntimeError("invalid DER: expected SEQUENCE")
+    i += 1
+    if i >= len(der):
+        raise RuntimeError("invalid DER length")
+
+    def read_len(buf: bytes, idx: int) -> tuple[int, int]:
+        if idx >= len(buf):
+            raise RuntimeError("invalid DER length")
+        first = buf[idx]
+        idx += 1
+        if first < 0x80:
+            return first, idx
+        n = first & 0x7F
+        if n == 0 or n > 4 or idx + n > len(buf):
+            raise RuntimeError("invalid DER length")
+        val = 0
+        for _ in range(n):
+            val = (val << 8) | buf[idx]
+            idx += 1
+        return val, idx
+
+    _, i = read_len(der, i)
+
+    # Skip AlgorithmIdentifier SEQUENCE.
+    if i >= len(der) or der[i] != 0x30:
+        raise RuntimeError("invalid DER: expected algorithm SEQUENCE")
+    i += 1
+    alg_len, i = read_len(der, i)
+    i += alg_len
+    if i >= len(der) or der[i] != 0x03:
+        raise RuntimeError("invalid DER: expected BIT STRING")
+    i += 1
+    bit_len, i = read_len(der, i)
+    if i >= len(der) or bit_len < 2:
+        raise RuntimeError("invalid DER: BIT STRING too short")
+    unused_bits = der[i]
+    if unused_bits != 0:
+        raise RuntimeError("invalid DER: non-zero unused bits")
+    i += 1
+    key = der[i:i + bit_len - 1]
+    if not key or key[0] != 0x04:
+        raise RuntimeError("invalid DER: expected uncompressed point")
+    return key
+
+
+def extract_pubkey_raw_base64(priv_path: Path) -> str:
+    cmds = [
+        ["openssl", "pkey", "-in", str(priv_path), "-text_pub", "-noout"],
+        ["openssl", "ec", "-in", str(priv_path), "-text", "-noout"],
+    ]
+    pub_hex = ""
+    last_err = None
+    for cmd in cmds:
+        try:
+            out = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError as e:
+            last_err = e.output
+            continue
+        pub_hex = _extract_pub_hex_from_text(out)
+        if pub_hex:
+            break
+
     if not pub_hex:
-        raise RuntimeError("failed to parse public key from openssl output")
+        try:
+            der = subprocess.check_output([
+                "openssl", "pkey", "-in", str(priv_path), "-pubout", "-outform", "DER"
+            ])
+            raw = _extract_pubkey_from_der(der)
+        except Exception as e:
+            raise RuntimeError(f"failed to parse public key from openssl output: {last_err or e}") from e
+        if raw.startswith(b"\x04"):
+            raw = raw[1:]
+        if len(raw) != 64:
+            raise RuntimeError(f"unexpected pubkey size: {len(raw)} bytes")
+        return base64.b64encode(raw).decode("ascii")
+
     if pub_hex.startswith("04"):
         pub_hex = pub_hex[2:]
     raw = bytes.fromhex(pub_hex)
