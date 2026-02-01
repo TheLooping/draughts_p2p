@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -10,6 +11,7 @@
 #include <openssl/err.h>
 #include <openssl/kdf.h>
 #include <openssl/obj_mac.h>
+#include <openssl/pem.h>
 #include <openssl/rand.h>
 
 namespace draughts {
@@ -164,6 +166,10 @@ Sm2KeyPair::Sm2KeyPair() : key_pair_(nullptr) {
     key_pair_.reset(sm2_keypair_new());
 }
 
+Sm2KeyPair::Sm2KeyPair(PkeyPtr key_pair) : key_pair_(std::move(key_pair)) {
+    if (!key_pair_) throw std::runtime_error("SM2 keypair not initialized");
+}
+
 Sm2KeyPair::~Sm2KeyPair() = default;
 
 Sm2KeyPair::Sm2KeyPair(Sm2KeyPair&& other) noexcept : key_pair_(std::move(other.key_pair_)) {}
@@ -240,6 +246,40 @@ std::pair<Key, Iv> Sm2KeyPair::DeriveKeyAndIv(const std::vector<Byte>& shared_se
     return {key, iv};
 }
 
+Sm2KeyPair Sm2KeyPair::LoadFromPemFile(const std::string& path) {
+    EnsureOpenSslInitialized();
+    FILE* fp = std::fopen(path.c_str(), "rb");
+    if (!fp) throw std::runtime_error("failed to open key file: " + path);
+    EVP_PKEY* pkey = PEM_read_PrivateKey(fp, nullptr, nullptr, nullptr);
+    std::fclose(fp);
+    if (!pkey) ThrowOpenSslError("PEM_read_PrivateKey");
+
+    int base_id = EVP_PKEY_base_id(pkey);
+    bool base_ok = (base_id == EVP_PKEY_EC);
+#ifdef EVP_PKEY_SM2
+    base_ok = base_ok || (base_id == EVP_PKEY_SM2);
+#endif
+    if (!base_ok) {
+        EVP_PKEY_free(pkey);
+        throw std::runtime_error("private key is not EC/SM2: " + path);
+    }
+
+    if (base_id == EVP_PKEY_EC) {
+        const EC_KEY* ec = EVP_PKEY_get0_EC_KEY(pkey);
+        if (ec) {
+            const EC_GROUP* group = EC_KEY_get0_group(ec);
+            if (group) {
+                int nid = EC_GROUP_get_curve_name(group);
+                if (nid != NID_sm2) {
+                    EVP_PKEY_free(pkey);
+                    throw std::runtime_error("EC key is not SM2 curve: " + path);
+                }
+            }
+        }
+    }
+
+    return Sm2KeyPair(PkeyPtr(pkey));
+}
+
 } // namespace crypto
 } // namespace draughts
-

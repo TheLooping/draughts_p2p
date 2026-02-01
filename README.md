@@ -2,7 +2,7 @@
 
 本项目是 **Draughts 匿名路由协议** 在去中心化 P2P 覆盖网络上的 C++17 原型实现，包含：
 
-- **HyParView**：基于 **UDP/IPv4** 的主动/被动邻居维护。
+- **静态拓扑**：基于 **UDP/IPv4** 的预生成邻接关系（不再考虑动态加入）。
 - **两跳邻居同步**：用于局部 NNH 选择。
 - **Draughts 随机游走路由**：带 **CIPLC** 路径长度控制。
 - **匿名请求/响应**：使用 **SM2-ECDH + HKDF + AES-CTR XOR**。
@@ -49,6 +49,9 @@ cmake --build . -j
 - `active_neighbors_file`：当前 active 邻居列表 JSON（覆盖写、退出时删除）。
 - `self_info_file`：节点自信息文件（地址/端口/公钥），供外部查询。
 - `peer_info_dir`：自信息文件目录，CLI 可用于解析 `peer_id`。
+- `identity_key_file`：SM2 私钥文件（PEM）。
+- `static_topology`：是否启用静态拓扑（推荐 true）。
+- `topology_dir`：拓扑文件目录（每节点 `.neighbors`）。
 
 ### 实验：单机 36 节点（CLI 为 node10/node20）
 
@@ -57,27 +60,22 @@ cmake --build . -j
 ./scripts/clean_experiment.sh
 ```
 
-生成配置：
+生成配置 + 密钥 + 拓扑：
 ```bash
-./scripts/gen_configs.py --count 36 --cli-nodes 10,20 --active-min 3 --active-max 5 --neighbor-set-k 5 --bind-ip 127.0.0.1 --bootstrap-count 1
+./scripts/gen_configs.py --count 36 --cli-nodes 10,20 --active-min 3 --active-max 5 --neighbor-set-k 5 --bind-ip 127.0.0.1
 ```
 
-启动引导节点（最先）：
+启动中继节点（每 1 秒一个）：
 ```bash
-./scripts/run_nodes.sh --only node1 --interval 5
+./scripts/run_nodes.sh --skip node10,node20 --interval 1
 ```
 
-启动其余中继节点（每 5 秒一个）：
-```bash
-./scripts/run_nodes.sh --skip node1,node10,node20 --interval 5
-```
-
-最后启动 CLI 节点（终端 A）：
+启动 CLI 节点（终端 A）：
 ```bash
 ./build/draughts_node config/generated/node10.conf
 ```
 
-最后启动 CLI 节点（终端 B）：
+启动 CLI 节点（终端 B）：
 ```bash
 ./build/draughts_node config/generated/node20.conf
 ```

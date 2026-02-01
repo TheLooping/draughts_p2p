@@ -3,6 +3,7 @@
 #include <csignal>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base64.hpp"
@@ -62,8 +63,19 @@ int main(int argc, char** argv) {
 
     boost::asio::io_context io;
 
-    draughts::crypto::Sm2KeyPair identity;
-    auto pub_raw = identity.public_key_raw();
+    std::optional<draughts::crypto::Sm2KeyPair> identity;
+    try {
+        if (!cfg.identity_key_file.empty()) {
+            identity.emplace(draughts::crypto::Sm2KeyPair::LoadFromPemFile(cfg.identity_key_file));
+        } else {
+            identity.emplace();
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "failed to load identity key: " << e.what() << "\n";
+        return 2;
+    }
+
+    auto pub_raw = identity->public_key_raw();
     std::vector<uint8_t> pub_vec(pub_raw.begin(), pub_raw.end());
 
     proto::PeerDescriptor self;
@@ -76,7 +88,7 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    DraughtsApp app(io, cfg, node, std::move(identity), logger, console);
+    DraughtsApp app(io, cfg, node, std::move(*identity), logger, console);
     if (!app.start()) {
         std::cerr << "failed to start draughts app (bind failed)\n";
         return 2;

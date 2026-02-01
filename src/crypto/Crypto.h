@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <openssl/evp.h>
@@ -42,6 +43,7 @@ public:
     std::vector<Byte> DeriveSharedSecret(const PubKey& peer_public_key_raw) const;
 
     static std::pair<Key, Iv> DeriveKeyAndIv(const std::vector<Byte>& shared_secret);
+    static Sm2KeyPair LoadFromPemFile(const std::string& path);
 
 private:
     struct PkeyDeleter {
@@ -49,9 +51,10 @@ private:
     };
     using PkeyPtr = std::unique_ptr<EVP_PKEY, PkeyDeleter>;
 
+    explicit Sm2KeyPair(PkeyPtr key_pair);
+
     PkeyPtr key_pair_;
 };
 
 } // namespace crypto
 } // namespace draughts
-

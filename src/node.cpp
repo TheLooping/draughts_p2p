@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 using boost::asio::ip::make_address_v4;
@@ -100,6 +101,76 @@ std::string json_escape(const std::string& s) {
     return out;
 }
 
+struct PeerInfoFile {
+    std::string peer_id;
+    std::string bind_ip;
+    uint16_t overlay_port = 0;
+    uint16_t draughts_port = 0;
+    std::string pubkey;
+};
+
+bool load_peer_info_file(const std::string& path, PeerInfoFile& out) {
+    std::ifstream in(path);
+    if (!in.is_open()) return false;
+    std::string line;
+    while (std::getline(in, line)) {
+        line = trim(line);
+        if (line.empty()) continue;
+        if (line[0] == '#') continue;
+        auto pos = line.find('=');
+        if (pos == std::string::npos) continue;
+        std::string key = trim(line.substr(0, pos));
+        std::string val = trim(line.substr(pos + 1));
+        if (key == "peer_id") out.peer_id = val;
+        else if (key == "bind_ip") out.bind_ip = val;
+        else if (key == "overlay_port") out.overlay_port = static_cast<uint16_t>(std::stoul(val));
+        else if (key == "draughts_port") out.draughts_port = static_cast<uint16_t>(std::stoul(val));
+        else if (key == "pubkey") out.pubkey = val;
+    }
+    return !out.peer_id.empty() && !out.bind_ip.empty() && out.draughts_port != 0 && !out.pubkey.empty();
+}
+
+bool load_peer_descriptor(const std::string& peer_id,
+                          const std::string& peer_info_dir,
+                          proto::PeerDescriptor& out) {
+    if (peer_info_dir.empty()) return false;
+    PeerInfoFile info;
+    std::string path = peer_info_dir + "/" + peer_id + ".info";
+    if (!load_peer_info_file(path, info)) return false;
+    boost::system::error_code ec;
+    auto addr = address_v4::from_string(info.bind_ip, ec);
+    if (ec) return false;
+    out.peer_id = info.peer_id;
+    out.ip = bytes_from_addr(addr);
+    out.overlay_port = info.overlay_port;
+    out.draughts_port = info.draughts_port;
+    out.pubkey = info.pubkey;
+    return true;
+}
+
+std::vector<std::string> load_neighbors_file(const std::string& path) {
+    std::ifstream in(path);
+    if (!in.is_open()) return {};
+    std::vector<std::string> out;
+    std::unordered_set<std::string> seen;
+    std::string line;
+    while (std::getline(in, line)) {
+        line = trim(line);
+        if (line.empty()) continue;
+        if (line[0] == '#') continue;
+        for (char& c : line) {
+            if (c == ',') c = ' ';
+        }
+        std::stringstream ss(line);
+        std::string token;
+        while (ss >> token) {
+            if (!seen.insert(token).second) continue;
+            out.push_back(token);
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 DraughtsNode::DraughtsNode(boost::asio::io_context& io,
@@ -145,25 +216,30 @@ bool DraughtsNode::start() {
     logger_.info("node start peer_id=" + self_.peer_id + " bind=" + peer_to_string(self_));
 
     write_self_info_file();
+    if (cfg_.static_topology) {
+        if (!load_static_topology()) return false;
+    }
     update_active_neighbors_file(true);
     do_receive();
 
-    // Bootstrap
-    for (const auto& b : cfg_.bootstraps) {
-        auto be = parse_bootstrap(b);
-        if (!be) {
-            logger_.warn("invalid bootstrap: " + b);
-            continue;
+    if (!cfg_.static_topology) {
+        // Bootstrap
+        for (const auto& b : cfg_.bootstraps) {
+            auto be = parse_bootstrap(b);
+            if (!be) {
+                logger_.warn("invalid bootstrap: " + b);
+                continue;
+            }
+            proto::Message m = proto::make_join(rand_u64(), self_);
+            send_msg(m, udp::endpoint(be->addr, be->overlay_port));
         }
-        proto::Message m = proto::make_join(rand_u64(), self_);
-        send_msg(m, udp::endpoint(be->addr, be->overlay_port));
-    }
 
-    tick_keepalive();
-    tick_shuffle();
-    tick_repair();
-    tick_pending();
-    tick_neighbor_set();
+        tick_keepalive();
+        tick_shuffle();
+        tick_repair();
+        tick_pending();
+        tick_neighbor_set();
+    }
     tick_housekeeping();
     return true;
 }
@@ -299,6 +375,10 @@ void DraughtsNode::on_datagram(const tlv::Bytes& bytes, const udp::endpoint& fro
         m = proto::decode(bytes);
     } catch (const std::exception& e) {
         logger_.warn(std::string("decode failed from ") + ep_to_string(from) + ": " + e.what());
+        return;
+    }
+
+    if (cfg_.static_topology) {
         return;
     }
 
@@ -496,10 +576,12 @@ void DraughtsNode::tick_housekeeping() {
         if (ec) return;
         uint64_t now = now_ms();
 
-        // Prune stale two-hop entries (30s)
-        for (auto it = twohop_.begin(); it != twohop_.end(); ) {
-            if (now - it->second.updated_ms > 30000) it = twohop_.erase(it);
-            else ++it;
+        if (!cfg_.static_topology) {
+            // Prune stale two-hop entries (30s)
+            for (auto it = twohop_.begin(); it != twohop_.end(); ) {
+                if (now - it->second.updated_ms > 30000) it = twohop_.erase(it);
+                else ++it;
+            }
         }
 
         update_active_neighbors_file(false);
@@ -608,8 +690,66 @@ void DraughtsNode::write_self_info_file() {
 }
 
 void DraughtsNode::remove_self_info_file() {
+    if (cfg_.static_topology) return;
     if (cfg_.self_info_file.empty()) return;
     std::remove(cfg_.self_info_file.c_str());
+}
+
+bool DraughtsNode::load_static_topology() {
+    if (cfg_.topology_dir.empty()) {
+        logger_.error("static_topology enabled but topology_dir is empty");
+        return false;
+    }
+    if (cfg_.peer_info_dir.empty()) {
+        logger_.error("static_topology enabled but peer_info_dir is empty");
+        return false;
+    }
+
+    const std::string self_neighbors_path = cfg_.topology_dir + "/" + self_.peer_id + ".neighbors";
+    auto neighbor_ids = load_neighbors_file(self_neighbors_path);
+    if (neighbor_ids.empty()) {
+        logger_.warn("no neighbors loaded from " + self_neighbors_path);
+    }
+    if (neighbor_ids.size() < cfg_.active_min || neighbor_ids.size() > cfg_.active_max) {
+        logger_.warn("neighbor degree out of range: " + std::to_string(neighbor_ids.size()) +
+                     " (expected " + std::to_string(cfg_.active_min) + "-" + std::to_string(cfg_.active_max) + ")");
+    }
+
+    const uint64_t static_lease = std::numeric_limits<uint64_t>::max();
+    for (const auto& peer_id : neighbor_ids) {
+        if (peer_id == self_.peer_id) continue;
+        proto::PeerDescriptor desc;
+        if (!load_peer_descriptor(peer_id, cfg_.peer_info_dir, desc)) {
+            logger_.warn("failed to load peer info for neighbor: " + peer_id);
+            continue;
+        }
+        views_.upsert_active(desc, static_lease);
+        learn_peer(desc);
+    }
+
+    for (const auto& neighbor_id : neighbor_ids) {
+        std::string path = cfg_.topology_dir + "/" + neighbor_id + ".neighbors";
+        auto nnh_ids = load_neighbors_file(path);
+        std::vector<proto::PeerDescriptor> nnh_descs;
+        nnh_descs.reserve(nnh_ids.size());
+        for (const auto& nnh_id : nnh_ids) {
+            if (nnh_id == self_.peer_id) continue;
+            proto::PeerDescriptor d;
+            if (!load_peer_descriptor(nnh_id, cfg_.peer_info_dir, d)) {
+                logger_.warn("failed to load peer info for two-hop: " + nnh_id);
+                continue;
+            }
+            nnh_descs.push_back(d);
+            learn_peer(d);
+        }
+        if (!neighbor_id.empty()) {
+            twohop_[neighbor_id] = TwoHopEntry{nnh_descs, now_ms()};
+        }
+    }
+
+    logger_.info("static topology loaded: active=" + std::to_string(views_.active_size()) +
+                 " twohop=" + std::to_string(twohop_.size()));
+    return true;
 }
 
 // ------------------- Overlay logic -------------------

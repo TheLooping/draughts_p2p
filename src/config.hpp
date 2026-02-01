@@ -19,6 +19,9 @@ struct Config {
     std::string active_neighbors_file;
     std::string self_info_file;
     std::string peer_info_dir;
+    std::string identity_key_file;
+    bool static_topology = false;
+    std::string topology_dir;
 
     // HyParView view sizes
     size_t active_min = 4;

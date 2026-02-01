@@ -78,6 +78,7 @@ private:
     void remove_active_neighbors_file();
     void write_self_info_file();
     void remove_self_info_file();
+    bool load_static_topology();
 
     // Overlay handlers
     void handle_join(uint64_t nonce, const tlv::Bytes& payload, const udp::endpoint& from);

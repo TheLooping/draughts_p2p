@@ -66,6 +66,16 @@ bool load_config(const std::string& path, Config& out, std::string& err) {
             else if (key == "active_neighbors_file") out.active_neighbors_file = val;
             else if (key == "self_info_file") out.self_info_file = val;
             else if (key == "peer_info_dir") out.peer_info_dir = val;
+            else if (key == "identity_key_file") out.identity_key_file = val;
+            else if (key == "static_topology") {
+                bool b = false;
+                if (!parse_bool(val, b)) {
+                    err = "bad config value at line " + std::to_string(lineno) + ": invalid bool";
+                    return false;
+                }
+                out.static_topology = b;
+            }
+            else if (key == "topology_dir") out.topology_dir = val;
 
             else if (key == "active_min") out.active_min = static_cast<size_t>(std::stoul(val));
             else if (key == "active_max") out.active_max = static_cast<size_t>(std::stoul(val));

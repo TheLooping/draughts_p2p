@@ -23,6 +23,8 @@ rm -rf "$ROOT/run" \
        "$ROOT/logs" \
        "$ROOT/neighbors" \
        "$ROOT/peers" \
+       "$ROOT/keys" \
+       "$ROOT/topology" \
        "$ROOT/config/generated" \
        "$ROOT/topology_state.json" \
        "$ROOT/topology_matrix.csv" \
