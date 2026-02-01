@@ -60,12 +60,21 @@ cmake --build . -j
 ./scripts/clean_experiment.sh
 ```
 
-生成配置 + 密钥 + 拓扑：
+编译：
+```bash
+mkdir -p build
+cd build
+cmake ..
+cmake --build . -j
+cd ..
+```
+
+生成配置 + 密钥 + 静态拓扑：
 ```bash
 ./scripts/gen_configs.py --count 36 --cli-nodes 10,20 --active-min 3 --active-max 5 --neighbor-set-k 5 --bind-ip 127.0.0.1
 ```
 
-启动中继节点（每 1 秒一个）：
+启动中继节点（每 1 秒一个，跳过 CLI 节点）：
 ```bash
 ./scripts/run_nodes.sh --skip node10,node20 --interval 1
 ```
@@ -80,20 +89,31 @@ cmake --build . -j
 ./build/draughts_node config/generated/node20.conf
 ```
 
-启动拓扑收集器：
+测试（终端 A / B 的 CLI 中执行）：
 ```bash
-./scripts/topology_collector.py --bind 0.0.0.0 --port 9000
+id
+neighbors
+send node20 hello-from-node10
 ```
 
-启动邻居上报：
+终端 B 查看收件箱：
 ```bash
-./scripts/send_neighbors.py --dir neighbors --host 127.0.0.1 --port 9000 --interval 2
+inbox
+requests
+reply <session_hex> ok-from-node20
 ```
 
 停止所有后台中继节点：
 ```bash
 ./scripts/stop_nodes.sh
 ```
+
+测试预期：
+- 各节点日志出现 `static topology loaded`，active 邻居数在 `active_min~active_max` 范围内。
+- CLI 的 `neighbors` 能看到 3~5 个邻居（与配置一致）。
+- `send` 后对端 `inbox` 出现请求；`reply` 后发起端出现响应。
+- `peers/` 中存在每个节点的 `*.info`；`keys/` 中存在每个节点的 `*.pem` 与 `*.pub`。
+- `topology/adjacency_matrix.csv` 与 `topology/adjacency.json` 已生成（静态拓扑，不需要拓扑收集器）。
 
 示例：本地 3 节点配置
 
