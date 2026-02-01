@@ -191,6 +191,7 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
         console_.println("usage: send <peer_id|ipv4:port> <text>");
         return;
     }
+    logger_.info("cli send dest=" + dest + " text_len=" + std::to_string(text.size()));
 
     address_v4 resp_addr;
     uint16_t resp_port = 0;
@@ -198,6 +199,7 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
     std::string resp_peer_id;
     if (!resolve_peer_target(dest, resp_addr, resp_port, resp_pub, resp_peer_id)) {
         console_.println("responder not found (need peer_id or ipv4:port with published info)");
+        logger_.warn("cli send failed: responder not found dest=" + dest);
         return;
     }
 
@@ -209,6 +211,7 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
     draughts::crypto::PubKey nnh_pub{};
     if (!pick_nh_nnh(nh_addr, nh_port, nh_pub, nnh_addr, nnh_port, nnh_pub, "")) {
         console_.println("no active neighbors to start random walk");
+        logger_.warn("cli send failed: no active neighbors");
         return;
     }
 
@@ -236,14 +239,17 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
     // Layering rules for c_addr_resp / c_addr_init.
     if (!transform_addr_layer(p.params.c_addr_resp, ph_tmp, nh_pub)) {
         console_.println("failed to wrap c_addr_resp for first hop");
+        logger_.warn("cli send failed: wrap c_addr_resp (nh)");
         return;
     }
     if (!transform_addr_layer(p.params.c_addr_resp, ph_tmp, nnh_pub)) {
         console_.println("failed to wrap c_addr_resp for second hop");
+        logger_.warn("cli send failed: wrap c_addr_resp (nnh)");
         return;
     }
     if (!transform_addr_layer(p.params.c_addr_init, identity_, resp_pub)) {
         console_.println("failed to wrap c_addr_init for responder");
+        logger_.warn("cli send failed: wrap c_addr_init");
         return;
     }
 
@@ -261,6 +267,7 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
 
     if (!encrypt_params_for_next_hop(p, nh_pub, ph_tmp)) {
         console_.println("failed to encrypt params for first hop");
+        logger_.warn("cli send failed: encrypt params");
         return;
     }
 
@@ -293,6 +300,7 @@ void DraughtsApp::cmd_inbox() {
         }
         console_.println(oss.str());
     }
+    logger_.info("cli inbox count=" + std::to_string(inbox_.size()));
 }
 
 void DraughtsApp::cmd_requests() {
@@ -302,6 +310,8 @@ void DraughtsApp::cmd_requests() {
     for (const auto& kv : counts) {
         console_.println("  session=" + session_hex(kv.first) + " pending=" + std::to_string(kv.second));
     }
+    logger_.info("cli requests sessions=" + std::to_string(counts.size()) +
+                 " entries=" + std::to_string(responder_lru_.size()));
 }
 
 void DraughtsApp::cmd_reply(const std::string& session_hex_in, const std::string& text) {
@@ -309,10 +319,12 @@ void DraughtsApp::cmd_reply(const std::string& session_hex_in, const std::string
         console_.println("usage: reply <session_hex> <text>");
         return;
     }
+    logger_.info("cli reply session=" + session_hex_in + " text_len=" + std::to_string(text.size()));
 
     std::string sid;
     if (session_hex_in.size() % 2 != 0) {
         console_.println("session_hex must have even length");
+        logger_.warn("cli reply failed: invalid session_hex length");
         return;
     }
     sid.resize(session_hex_in.size() / 2);
@@ -323,16 +335,19 @@ void DraughtsApp::cmd_reply(const std::string& session_hex_in, const std::string
         }
     } catch (...) {
         console_.println("invalid session hex");
+        logger_.warn("cli reply failed: invalid session_hex format");
         return;
     }
 
     ResponderValue value;
     if (!responder_lru_.get_first_and_move_to_tail(sid, value)) {
         console_.println("unknown session id");
+        logger_.warn("cli reply failed: unknown session id " + session_hex_in);
         return;
     }
     if (value.addr_nnh.is_unspecified() || value.port_nnh == 0) {
         console_.println("session missing nnh address; cannot reply");
+        logger_.warn("cli reply failed: missing nnh address");
         return;
     }
 

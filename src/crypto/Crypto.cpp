@@ -264,19 +264,45 @@ Sm2KeyPair Sm2KeyPair::LoadFromPemFile(const std::string& path) {
         throw std::runtime_error("private key is not EC/SM2: " + path);
     }
 
-    if (base_id == EVP_PKEY_EC) {
-        const EC_KEY* ec = EVP_PKEY_get0_EC_KEY(pkey);
-        if (ec) {
-            const EC_GROUP* group = EC_KEY_get0_group(ec);
-            if (group) {
-                int nid = EC_GROUP_get_curve_name(group);
-                if (nid != NID_sm2) {
-                    EVP_PKEY_free(pkey);
-                    throw std::runtime_error("EC key is not SM2 curve: " + path);
-                }
+    const EC_KEY* ec = EVP_PKEY_get0_EC_KEY(pkey);
+    if (ec) {
+        const EC_GROUP* group = EC_KEY_get0_group(ec);
+        if (group) {
+            int nid = EC_GROUP_get_curve_name(group);
+            if (nid != NID_sm2) {
+                EVP_PKEY_free(pkey);
+                throw std::runtime_error("EC key is not SM2 curve: " + path);
             }
         }
     }
+
+#ifdef EVP_PKEY_SM2
+    if (base_id == EVP_PKEY_SM2) {
+        if (!ec) {
+            EVP_PKEY_free(pkey);
+            ThrowOpenSslError("EVP_PKEY_get0_EC_KEY(sm2)");
+        }
+        EC_KEY* dup = EC_KEY_dup(ec);
+        if (!dup) {
+            EVP_PKEY_free(pkey);
+            ThrowOpenSslError("EC_KEY_dup(sm2)");
+        }
+        EVP_PKEY* ec_pkey = EVP_PKEY_new();
+        if (!ec_pkey) {
+            EC_KEY_free(dup);
+            EVP_PKEY_free(pkey);
+            ThrowOpenSslError("EVP_PKEY_new");
+        }
+        if (EVP_PKEY_assign_EC_KEY(ec_pkey, dup) != 1) {
+            EC_KEY_free(dup);
+            EVP_PKEY_free(ec_pkey);
+            EVP_PKEY_free(pkey);
+            ThrowOpenSslError("EVP_PKEY_assign_EC_KEY");
+        }
+        EVP_PKEY_free(pkey);
+        pkey = ec_pkey;
+    }
+#endif
 
     return Sm2KeyPair(PkeyPtr(pkey));
 }

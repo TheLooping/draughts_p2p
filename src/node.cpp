@@ -265,6 +265,7 @@ void DraughtsNode::cmd_show_id() {
         << " active=" << views_.active_size() << "/" << cfg_.active_max
         << " passive=" << views_.passive_size() << "/" << cfg_.passive_max;
     console_.println(oss.str());
+    logger_.info("cli id");
 }
 
 void DraughtsNode::cmd_show_neighbors() {
@@ -274,32 +275,48 @@ void DraughtsNode::cmd_show_neighbors() {
     console_.println(oss.str());
     if (act.empty()) {
         console_.println("  (none)");
+        logger_.info("cli neighbors count=0");
         return;
     }
     for (const auto& d : act) {
         console_.println("  - " + d.peer_id + " @ " + peer_to_string(d));
     }
+    logger_.info("cli neighbors count=" + std::to_string(act.size()));
 }
 
 void DraughtsNode::cmd_show_twohop() {
     console_.println("Two-hop cache entries: " + std::to_string(twohop_.size()));
     if (twohop_.empty()) {
         console_.println("  (empty)");
+        logger_.info("cli twohop entries=0");
         return;
     }
     for (const auto& kv : twohop_) {
         const auto& peer = kv.first;
         const auto& e = kv.second;
         std::ostringstream oss;
-        oss << "  * " << peer << " => " << e.neighbors.size() << " peers";
+        oss << "  * " << peer << " (" << e.neighbors.size() << "):";
         console_.println(oss.str());
+        if (e.neighbors.empty()) {
+            console_.println("    (none)");
+            continue;
+        }
+        std::ostringstream line;
+        line << "    ";
+        for (size_t i = 0; i < e.neighbors.size(); ++i) {
+            if (i > 0) line << ", ";
+            line << e.neighbors[i].peer_id;
+        }
+        console_.println(line.str());
     }
+    logger_.info("cli twohop entries=" + std::to_string(twohop_.size()));
 }
 
 void DraughtsNode::cmd_show_peers() {
     console_.println("Known peers (directory): " + std::to_string(directory_.size()));
     if (directory_.empty()) {
         console_.println("  (empty)");
+        logger_.info("cli peers count=0");
         return;
     }
     size_t n = 0;
@@ -311,6 +328,7 @@ void DraughtsNode::cmd_show_peers() {
             break;
         }
     }
+    logger_.info("cli peers count=" + std::to_string(directory_.size()));
 }
 
 std::vector<proto::PeerDescriptor> DraughtsNode::all_peers() const {
