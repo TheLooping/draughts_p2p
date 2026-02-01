@@ -11,9 +11,35 @@ ONLY_LIST=""
 INTERVAL=5
 
 usage() {
-  cat <<EOF
+  cat <<EOF2
 Usage: $0 [--configs-dir DIR] [--binary PATH] [--run-dir DIR] [--seed-count N] [--seed-delay SEC] [--skip name1,name2] [--only name1,name2] [--interval SEC]
-EOF
+EOF2
+}
+
+append_list() {
+  local list="$1"
+  local add="$2"
+  if [[ -z "$add" ]]; then
+    echo "$list"
+    return
+  fi
+  if [[ -z "$list" ]]; then
+    echo "$add"
+  else
+    echo "$list,$add"
+  fi
+}
+
+in_list() {
+  local item="$1"
+  local list="$2"
+  if [[ -z "$list" ]]; then
+    return 1
+  fi
+  case ",$list," in
+    *",$item,"*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 while [[ $# -gt 0 ]]; do
@@ -23,8 +49,8 @@ while [[ $# -gt 0 ]]; do
     --run-dir) RUN_DIR="$2"; shift 2 ;;
     --seed-count) SEED_COUNT="$2"; shift 2 ;;
     --seed-delay) SEED_DELAY="$2"; shift 2 ;;
-    --skip) SKIP_LIST="$2"; shift 2 ;;
-    --only) ONLY_LIST="$2"; shift 2 ;;
+    --skip) SKIP_LIST=$(append_list "$SKIP_LIST" "$2"); shift 2 ;;
+    --only) ONLY_LIST=$(append_list "$ONLY_LIST" "$2"); shift 2 ;;
     --interval) INTERVAL="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown arg: $1" >&2; usage; exit 1 ;;
@@ -41,22 +67,6 @@ PID_FILE="$RUN_DIR/nodes.pids"
 rm -f "$RUN_DIR"/*.out "$PID_FILE"
 : > "$PID_FILE"
 
-declare -A SKIP
-IFS=',' read -ra SKIP_ITEMS <<< "$SKIP_LIST"
-for item in "${SKIP_ITEMS[@]}"; do
-  [[ -z "$item" ]] && continue
-  SKIP["$item"]=1
-done
-
-declare -A ONLY
-if [[ -n "$ONLY_LIST" ]]; then
-  IFS=',' read -ra ONLY_ITEMS <<< "$ONLY_LIST"
-  for item in "${ONLY_ITEMS[@]}"; do
-    [[ -z "$item" ]] && continue
-    ONLY["$item"]=1
-  done
-fi
-
 shopt -s nullglob
 configs=("$CONFIGS_DIR"/*.conf)
 if [[ ${#configs[@]} -eq 0 ]]; then
@@ -68,12 +78,12 @@ filtered=()
 for cfg in "${configs[@]}"; do
   base=$(basename "$cfg")
   base_no_ext=$(basename "$cfg" .conf)
-  if [[ ${#ONLY[@]} -gt 0 ]]; then
-    if [[ -z "${ONLY[$base]+x}" && -z "${ONLY[$base_no_ext]+x}" ]]; then
+  if [[ -n "$ONLY_LIST" ]]; then
+    if ! in_list "$base" "$ONLY_LIST" && ! in_list "$base_no_ext" "$ONLY_LIST"; then
       continue
     fi
   fi
-  if [[ -n "${SKIP[$base]+x}" || -n "${SKIP[$base_no_ext]+x}" ]]; then
+  if in_list "$base" "$SKIP_LIST" || in_list "$base_no_ext" "$SKIP_LIST"; then
     continue
   fi
   filtered+=("$cfg")
