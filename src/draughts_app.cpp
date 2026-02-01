@@ -227,8 +227,9 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
     std::memcpy(p.pk_ph_tmp, ph_pub.data(), draughts::kPkSize);
     std::memcpy(p.params.pk_pph_tmp, ph_pub.data(), draughts::kPkSize);
 
-    // End-to-end init key (use identity to avoid per-session state).
-    auto init_pub = identity_.public_key_raw();
+    // End-to-end init key (per-session) for initiator address + payload.
+    draughts::crypto::Sm2KeyPair init_tmp;
+    auto init_pub = init_tmp.public_key_raw();
     std::memcpy(p.params.pk_init_tmp, init_pub.data(), draughts::kPkSize);
 
     // Addresses
@@ -247,7 +248,7 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
         logger_.warn("cli send failed: wrap c_addr_resp (nnh)");
         return;
     }
-    if (!transform_addr_layer(p.params.c_addr_init, identity_, resp_pub)) {
+    if (!transform_addr_layer(p.params.c_addr_init, init_tmp, resp_pub)) {
         console_.println("failed to wrap c_addr_init for responder");
         logger_.warn("cli send failed: wrap c_addr_init");
         return;
@@ -260,7 +261,7 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
     std::uint8_t pt[draughts::kDataSize] = {};
     encode_payload(text, pt);
 
-    auto secret = identity_.DeriveSharedSecret(resp_pub);
+    auto secret = init_tmp.DeriveSharedSecret(resp_pub);
     auto key_iv = draughts::crypto::Sm2KeyPair::DeriveKeyAndIv(secret);
     std::memcpy(p.c_data, pt, draughts::kDataSize);
     crypto::CommutativeCipher::TransformInPlace(p.c_data, draughts::kDataSize, key_iv.first, key_iv.second);
@@ -272,6 +273,7 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
     }
 
     initiator_session_ids_.insert(sid);
+    initiator_sessions_.emplace(sid, InitiatorSession{std::move(init_tmp), resp_pub, now_ms()});
 
     logger_.info("cli send request session=" + session_hex(sid) +
                  " responder=" + endpoint_to_string(resp_addr, resp_port) +
@@ -282,6 +284,7 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
         console_.println("failed to send packet to next hop");
         logger_.warn("cli send failed session=" + session_hex(sid));
         initiator_session_ids_.erase(sid);
+        initiator_sessions_.erase(sid);
         return;
     }
 
@@ -360,10 +363,8 @@ void DraughtsApp::cmd_reply(const std::string& session_hex_in, const std::string
 
     draughts::crypto::PubKey pk_init{};
     std::memcpy(pk_init.data(), value.pk_init_tmp.data(), draughts::kPkSize);
-    std::uint8_t c_addr_resp[draughts::kAddrSize];
-    std::memcpy(c_addr_resp, value.c_addr_init.data(), draughts::kAddrSize);
-    transform_addr_layer(c_addr_resp, identity_, pk_init);
-    std::memcpy(p.params.c_addr_resp, c_addr_resp, draughts::kAddrSize);
+    std::memcpy(p.params.c_addr_resp, value.c_addr_init.data(), draughts::kAddrSize);
+    draughts::zero_addr(p.params.c_addr_init);
 
     p.params.x = -2.0;
     p.params.magic_num = cfg_.magic_num;
@@ -432,37 +433,15 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
     double x = p.params.x;
 
     if (approx_eq(x, -1.0)) {
-        auto it = initiator_session_ids_.find(sid);
-        if (it != initiator_session_ids_.end()) {
+        auto it = initiator_sessions_.find(sid);
+        if (it != initiator_sessions_.end()) {
             std::string text;
-            bool ok = false;
-            auto peers = node_.all_peers();
-            if (peers.empty()) {
-                logger_.warn("no peers available for response decryption");
-                return;
-            }
             std::array<std::uint8_t, draughts::kDataSize> tmp{};
-            for (const auto& d : peers) {
-                if (d.pubkey.empty()) continue;
-                std::vector<uint8_t> raw;
-                try {
-                    raw = b64::decode(d.pubkey);
-                } catch (...) {
-                    continue;
-                }
-                if (raw.size() != draughts::kPkSize) continue;
-                draughts::crypto::PubKey resp_pub{};
-                std::memcpy(resp_pub.data(), raw.data(), draughts::kPkSize);
-                std::memcpy(tmp.data(), p.c_data, draughts::kDataSize);
-                auto secret = identity_.DeriveSharedSecret(resp_pub);
-                auto key_iv = draughts::crypto::Sm2KeyPair::DeriveKeyAndIv(secret);
-                crypto::CommutativeCipher::TransformInPlace(tmp.data(), draughts::kDataSize, key_iv.first, key_iv.second);
-                if (decode_payload(tmp.data(), text)) {
-                    ok = true;
-                    break;
-                }
-            }
-            if (!ok) {
+            std::memcpy(tmp.data(), p.c_data, draughts::kDataSize);
+            auto secret = it->second.init_key.DeriveSharedSecret(it->second.resp_pub);
+            auto key_iv = draughts::crypto::Sm2KeyPair::DeriveKeyAndIv(secret);
+            crypto::CommutativeCipher::TransformInPlace(tmp.data(), draughts::kDataSize, key_iv.first, key_iv.second);
+            if (!decode_payload(tmp.data(), text)) {
                 logger_.warn("failed to decrypt response payload");
                 return;
             }
@@ -470,7 +449,12 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
             logger_.info("recv reply session=" + session_hex(sid));
             inbox_.push_back(InboxItem{true, session_hex(sid), text, ""});
             console_.println("[REPLY] session=" + session_hex(sid) + " text=\"" + text + "\"");
-            initiator_session_ids_.erase(it);
+            initiator_sessions_.erase(it);
+            initiator_session_ids_.erase(sid);
+            return;
+        }
+        if (initiator_session_ids_.count(sid)) {
+            logger_.warn("missing initiator session key for reply");
             return;
         }
 
@@ -486,6 +470,10 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
             return;
         }
 
+        std::array<std::uint8_t, draughts::kAddrSize> c_addr_init{};
+        std::memcpy(c_addr_init.data(), p.params.c_addr_init, draughts::kAddrSize);
+        transform_addr_layer(c_addr_init.data(), identity_, pk_init);
+
         logger_.info("recv request session=" + session_hex(sid) +
                      " from=" + endpoint_to_string(from.address().to_v4(), from.port()));
         ResponderValue value{};
@@ -497,7 +485,7 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
             value.addr_nnh = address_v4::any();
             value.port_nnh = 0;
         }
-        std::memcpy(value.c_addr_init.data(), p.params.c_addr_init, draughts::kAddrSize);
+        std::memcpy(value.c_addr_init.data(), c_addr_init.data(), draughts::kAddrSize);
         value.created_ms = now_ms();
         responder_lru_.insert_head(sid, value);
 
@@ -720,9 +708,16 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
         logger_.warn("failed to peel c_addr_resp at exit");
         return;
     }
-    if (!transform_addr_layer(p.params.c_addr_init, identity_, nnh_pub)) {
-        logger_.warn("failed to add layer to c_addr_init at exit");
-        return;
+    if (draughts::is_zero_addr(p.params.c_addr_init)) {
+        if (!transform_addr_layer(p.params.c_addr_resp, identity_, nnh_pub)) {
+            logger_.warn("failed to add layer to c_addr_resp at exit (response)");
+            return;
+        }
+    } else {
+        if (!transform_addr_layer(p.params.c_addr_init, identity_, nnh_pub)) {
+            logger_.warn("failed to add layer to c_addr_init at exit (request)");
+            return;
+        }
     }
 
     p.params.x = 0.0;
@@ -1037,5 +1032,13 @@ bool DraughtsApp::resolve_peer_target(const std::string& dest,
 }
 
 void DraughtsApp::prune_sessions() {
-    (void)cfg_;
+    uint64_t now = now_ms();
+    for (auto it = initiator_sessions_.begin(); it != initiator_sessions_.end(); ) {
+        if (now - it->second.created_ms > cfg_.session_ttl_ms) {
+            initiator_session_ids_.erase(it->first);
+            it = initiator_sessions_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }

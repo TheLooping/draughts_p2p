@@ -47,6 +47,12 @@ private:
         std::string from_addr;
     };
 
+    struct InitiatorSession {
+        draughts::crypto::Sm2KeyPair init_key;
+        draughts::crypto::PubKey resp_pub{};
+        uint64_t created_ms = 0;
+    };
+
     struct ResponderValue {
         boost::asio::ip::address_v4 addr_ph;
         uint16_t port_ph = 0;
@@ -155,6 +161,7 @@ private:
     std::array<uint8_t, draughts::kPacketSize> rxbuf_{};
 
     std::unordered_set<std::string> initiator_session_ids_;
+    std::unordered_map<std::string, InitiatorSession> initiator_sessions_;
     ResponderLru responder_lru_;
 
     std::vector<InboxItem> inbox_;
