@@ -23,7 +23,7 @@ public:
                  Logger& logger,
                  Console& console);
 
-    void start();
+    bool start();
     void stop();
 
     // CLI-driven actions (these should be called from io_context thread via post)

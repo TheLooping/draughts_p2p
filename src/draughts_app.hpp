@@ -28,7 +28,7 @@ public:
                 Logger& logger,
                 Console& console);
 
-    void start();
+    bool start();
     void stop();
 
     // CLI actions

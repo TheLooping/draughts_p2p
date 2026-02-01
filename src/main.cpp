@@ -71,10 +71,16 @@ int main(int argc, char** argv) {
     self.pubkey = b64::encode(pub_vec);
 
     DraughtsNode node(io, cfg, self, logger, console);
-    node.start();
+    if (!node.start()) {
+        std::cerr << "failed to start node (overlay bind failed)\n";
+        return 2;
+    }
 
     DraughtsApp app(io, cfg, node, std::move(identity), logger, console);
-    app.start();
+    if (!app.start()) {
+        std::cerr << "failed to start draughts app (bind failed)\n";
+        return 2;
+    }
 
     boost::asio::signal_set signals(io, SIGINT, SIGTERM);
     signals.async_wait([&](const boost::system::error_code&, int) {

@@ -150,10 +150,20 @@ DraughtsApp::DraughtsApp(boost::asio::io_context& io,
     ciplc_.x = cfg_.ciplc_x0;
 }
 
-void DraughtsApp::start() {
+bool DraughtsApp::start() {
     udp::endpoint bind_ep(address_v4::from_string(cfg_.bind_ip), cfg_.draughts_port);
-    sock_.open(udp::v4());
-    sock_.bind(bind_ep);
+    boost::system::error_code ec;
+    sock_.open(udp::v4(), ec);
+    if (ec) {
+        logger_.error("failed to open draughts socket: " + ec.message());
+        return false;
+    }
+    sock_.bind(bind_ep, ec);
+    if (ec) {
+        logger_.error("failed to bind draughts socket: " + ec.message() +
+                      " (addr=" + cfg_.bind_ip + ":" + std::to_string(cfg_.draughts_port) + ")");
+        return false;
+    }
 
     do_receive();
 
@@ -167,6 +177,7 @@ void DraughtsApp::start() {
         });
     };
     (*tick)();
+    return true;
 }
 
 void DraughtsApp::stop() {

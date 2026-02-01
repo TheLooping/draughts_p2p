@@ -122,10 +122,20 @@ DraughtsNode::DraughtsNode(boost::asio::io_context& io,
       t_housekeeping_(io_) {
 }
 
-void DraughtsNode::start() {
+bool DraughtsNode::start() {
     udp::endpoint bind_ep(make_address_v4(cfg_.bind_ip), cfg_.overlay_port);
-    sock_.open(udp::v4());
-    sock_.bind(bind_ep);
+    boost::system::error_code ec;
+    sock_.open(udp::v4(), ec);
+    if (ec) {
+        logger_.error("failed to open overlay socket: " + ec.message());
+        return false;
+    }
+    sock_.bind(bind_ep, ec);
+    if (ec) {
+        logger_.error("failed to bind overlay socket: " + ec.message() +
+                      " (addr=" + cfg_.bind_ip + ":" + std::to_string(cfg_.overlay_port) + ")");
+        return false;
+    }
 
     auto local = sock_.local_endpoint();
     self_.ip = bytes_from_addr(local.address().to_v4());
@@ -155,6 +165,7 @@ void DraughtsNode::start() {
     tick_pending();
     tick_neighbor_set();
     tick_housekeeping();
+    return true;
 }
 
 void DraughtsNode::stop() {
