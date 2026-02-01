@@ -53,23 +53,23 @@ Clean old artifacts:
 
 Generate configs:
 ```bash
-./scripts/gen_configs.py --count 36 --cli-nodes 10,20 --active-min 3 --active-max 5 --neighbor-set-k 5 --bind-ip 127.0.0.1
+./scripts/gen_configs.py --count 36 --cli-nodes 10,20 --active-min 3 --active-max 5 --neighbor-set-k 5 --bind-ip 127.0.0.1 --bootstrap-count 1
 ```
 
-Start seed nodes one by one (every 5s):
+Start the single bootstrap node (first):
 ```bash
-./scripts/run_nodes.sh --only node1,node2,node3 --interval 5
+./scripts/run_nodes.sh --only node1 --interval 5
 ```
 
-Start CLI nodes in separate terminals:
+Start remaining relay nodes one by one (every 5s):
+```bash
+./scripts/run_nodes.sh --skip node1,node10,node20 --interval 5
+```
+
+Start CLI nodes in separate terminals (last):
 ```bash
 ./build/draughts_node config/generated/node10.conf
 ./build/draughts_node config/generated/node20.conf
-```
-
-Then start remaining relay nodes one by one (every 5s):
-```bash
-./scripts/run_nodes.sh --skip node1,node2,node3,node10,node20 --interval 5
 ```
 
 Start topology collector and sender:

@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--peer-info-dir", default="peers", help="self info file directory")
     p.add_argument("--cli-count", type=int, default=0, help="how many nodes enable CLI (ignored if --cli-nodes set)")
     p.add_argument("--cli-nodes", default="10,20", help="comma-separated node indices to enable CLI")
-    p.add_argument("--bootstrap-count", type=int, default=3, help="how many seed nodes to include as bootstraps")
+    p.add_argument("--bootstrap-count", type=int, default=1, help="how many seed nodes to include as bootstraps")
     p.add_argument("--active-min", type=int, default=4, help="minimum active neighbors")
     p.add_argument("--active-max", type=int, default=8, help="maximum active neighbors")
     p.add_argument("--passive-max", type=int, default=80, help="maximum passive neighbors")
