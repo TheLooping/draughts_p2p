@@ -3,6 +3,8 @@
 #include <cctype>
 #include <iostream>
 #include <sstream>
+#include <termios.h>
+#include <unistd.h>
 
 namespace {
 
@@ -36,6 +38,57 @@ static void print_help(Console& c) {
     c.println("  quit                          exit");
 }
 
+static bool read_line(Console& c, std::string& out) {
+    out.clear();
+    if (!::isatty(STDIN_FILENO)) {
+        return static_cast<bool>(std::getline(std::cin, out));
+    }
+
+    termios orig{};
+    if (::tcgetattr(STDIN_FILENO, &orig) != 0) {
+        return static_cast<bool>(std::getline(std::cin, out));
+    }
+    termios raw = orig;
+    raw.c_lflag &= static_cast<unsigned int>(~(ICANON | ECHO));
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    if (::tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) {
+        return static_cast<bool>(std::getline(std::cin, out));
+    }
+
+    auto restore = [&]() { ::tcsetattr(STDIN_FILENO, TCSANOW, &orig); };
+    char ch = 0;
+    while (true) {
+        ssize_t n = ::read(STDIN_FILENO, &ch, 1);
+        if (n <= 0) {
+            restore();
+            return false;
+        }
+        if (ch == '\r' || ch == '\n') {
+            c.print("\n");
+            break;
+        }
+        if (ch == 0x7f || ch == '\b') {
+            if (!out.empty()) {
+                out.pop_back();
+                c.print("\b \b");
+            }
+            continue;
+        }
+        if (ch == 0x03) {
+            c.print("^C\n");
+            restore();
+            return false;
+        }
+        if (std::isprint(static_cast<unsigned char>(ch))) {
+            out.push_back(ch);
+            c.print(std::string(1, ch));
+        }
+    }
+    restore();
+    return true;
+}
+
 } // namespace
 
 Cli::Cli(boost::asio::io_context& io, DraughtsNode& node, DraughtsApp& app, Console& console)
@@ -55,7 +108,7 @@ void Cli::run() {
     std::string line;
     while (!stop_.load()) {
         console_.print("draughts> ");
-        if (!std::getline(std::cin, line)) break;
+        if (!read_line(console_, line)) break;
         line = trim_ws(line);
         if (line.empty()) continue;
 

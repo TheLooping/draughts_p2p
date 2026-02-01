@@ -413,6 +413,7 @@ void DraughtsApp::on_datagram(const std::array<uint8_t, draughts::kPacketSize>& 
                               const udp::endpoint& from) {
     draughts::DraughtsPacket p{};
     std::memcpy(&p, bytes.data(), draughts::kPacketSize);
+    logger_.info("recv packet from " + peer_label_for(from.address().to_v4(), from.port()));
 
     if (draughts::is_exit_pk(p.pk_ph_tmp)) {
         handle_exit_packet(p, from);
@@ -771,8 +772,18 @@ bool DraughtsApp::send_packet_to(const draughts::DraughtsPacket& p,
     udp::endpoint ep(addr, port);
     auto buf = std::make_shared<std::array<uint8_t, draughts::kPacketSize>>();
     std::memcpy(buf->data(), &p, draughts::kPacketSize);
+    logger_.info("send packet to " + peer_label_for(addr, port));
     sock_.async_send_to(boost::asio::buffer(*buf), ep, [buf](auto, auto) {});
     return true;
+}
+
+std::string DraughtsApp::peer_label_for(const address_v4& addr, uint16_t port) const {
+    auto desc = node_.lookup_peer_by_draughts_endpoint(addr, port);
+    auto ep = endpoint_to_string(addr, port);
+    if (desc && !desc->peer_id.empty()) {
+        return desc->peer_id + "@" + ep;
+    }
+    return ep;
 }
 
 bool DraughtsApp::pick_nh_nnh(address_v4& nh_addr,

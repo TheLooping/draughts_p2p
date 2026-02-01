@@ -92,6 +92,7 @@ private:
     bool encrypt_params_for_next_hop(draughts::DraughtsPacket& p,
                                      const draughts::crypto::PubKey& next_pubkey,
                                      const draughts::crypto::Sm2KeyPair& ph_keypair);
+    std::string peer_label_for(const boost::asio::ip::address_v4& addr, uint16_t port) const;
 
     bool send_packet_to(const draughts::DraughtsPacket& p,
                         const boost::asio::ip::address_v4& addr,
