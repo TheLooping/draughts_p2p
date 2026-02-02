@@ -186,10 +186,10 @@ quit                             退出
 
 ```
 PK_PH_tmp (64) | PK_PPH_tmp (64) | PK_Init_tmp (64) | ADDR_NNH (6) |
-C_ADDR_Resp (6) | C_ADDR_Init (6) | x (8) | magic (8) | session_id (16) | C_Data (1038)
+C_ADDR_Real_Receiver (6) | C_ADDR_Real_Sender (6) | x (8) | magic (8) | session_id (16) | C_Data (1038)
 ```
 
-- `ADDR_NNH` / `C_ADDR_Resp` / `C_ADDR_Init` 为 **IPv4(4 字节) + 端口(2 字节)**。
+- `ADDR_NNH` / `C_ADDR_Real_Receiver` / `C_ADDR_Real_Sender` 为 **IPv4(4 字节) + 端口(2 字节)**。
 - `PK_PH_tmp` 为逐跳公钥，仅在三段“退出”阶段为 **0xEE..EE**。
 - `C_Data` 使用 `PK_Init_tmp` 与 responder/initiator 密钥端到端加密。
 

@@ -18,8 +18,8 @@ struct DraughtsParams {
     std::uint8_t pk_pph_tmp[kPkSize];
     std::uint8_t pk_init_tmp[kPkSize];
     std::uint8_t addr_nnh[kAddrSize];
-    std::uint8_t c_addr_resp[kAddrSize];
-    std::uint8_t c_addr_init[kAddrSize];
+    std::uint8_t c_addr_real_receiver[kAddrSize];
+    std::uint8_t c_addr_real_sender[kAddrSize];
     double x;
     std::uint64_t magic_num;
 };

@@ -62,7 +62,7 @@ private:
         draughts::crypto::PubKey pk_init_tmp;
         boost::asio::ip::address_v4 addr_nnh;
         uint16_t port_nnh = 0;
-        std::array<std::uint8_t, draughts::kAddrSize> c_addr_init{};
+        std::array<std::uint8_t, draughts::kAddrSize> c_addr_real_sender{};
         uint64_t created_ms = 0;
     };
 
@@ -104,7 +104,7 @@ private:
     void init_trace();
     std::string trace_store_key(const std::string& pem, const std::string& prefix);
     std::string trace_store_pub_raw(const draughts::crypto::PubKey& raw);
-    void trace_initiator_transform(const char* stage,
+    void trace_real_addr_transform(const char* stage,
                                    const char* flow,
                                    const char* field,
                                    const char* op,
@@ -117,18 +117,18 @@ private:
                                    const std::uint8_t after[draughts::kAddrSize],
                                    const draughts::crypto::Sm2KeyPair& priv_key,
                                    const draughts::crypto::PubKey& peer_pub);
-    bool transform_initiator_addr(std::uint8_t addr[draughts::kAddrSize],
-                                  const draughts::crypto::Sm2KeyPair& priv_key,
-                                  const draughts::crypto::PubKey& peer_pub,
-                                  const char* stage,
-                                  const char* flow,
-                                  const char* field,
-                                  const char* op,
-                                  const char* priv_role,
-                                  const char* peer_role,
-                                  const std::string& peer_id,
-                                  const std::string& peer_label,
-                                  const std::string& sid);
+    bool transform_real_addr(std::uint8_t addr[draughts::kAddrSize],
+                             const draughts::crypto::Sm2KeyPair& priv_key,
+                             const draughts::crypto::PubKey& peer_pub,
+                             const char* stage,
+                             const char* flow,
+                             const char* field,
+                             const char* op,
+                             const char* priv_role,
+                             const char* peer_role,
+                             const std::string& peer_id,
+                             const std::string& peer_label,
+                             const std::string& sid);
 
     bool send_packet_to(const draughts::DraughtsPacket& p,
                         const boost::asio::ip::address_v4& addr,
