@@ -754,10 +754,22 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     }
     draughts::crypto::PubKey pk_pph{};
     std::memcpy(pk_pph.data(), p.params.pk_pph_tmp, draughts::kPkSize);
+    std::array<uint8_t, draughts::kPkSize> prev_ph{};
+    std::memcpy(prev_ph.data(), p.pk_ph_tmp, draughts::kPkSize);
+    draughts::crypto::PubKey pk_prev{};
+    std::memcpy(pk_prev.data(), prev_ph.data(), draughts::kPkSize);
+
     if (response_flow) {
+        if (!is_zero_pk_bytes(pk_prev.data()) && !draughts::is_exit_pk(pk_prev.data())) {
+            if (!transform_initiator_addr(p.params.c_addr_resp, identity_, pk_prev,
+                                          "exit_peel_prev", "response", "c_addr_resp", sid)) {
+                logger_.warn("failed to peel c_addr_resp at exit (prev ph)");
+                return;
+            }
+        }
         if (!transform_initiator_addr(p.params.c_addr_resp, identity_, pk_pph,
-                                      "exit_peel", "response", "c_addr_resp", sid)) {
-            logger_.warn("failed to peel c_addr_resp at exit");
+                                      "exit_peel_exit", "response", "c_addr_resp", sid)) {
+            logger_.warn("failed to peel c_addr_resp at exit (exit ph)");
             return;
         }
         if (!transform_initiator_addr(p.params.c_addr_resp, identity_, nnh_pub,
@@ -780,13 +792,14 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     p.params.x = 0.0;
     addr_to_bytes(nnh_addr, nnh_port, p.params.addr_nnh);
 
-    std::array<uint8_t, draughts::kPkSize> old_ph{};
-    std::memcpy(old_ph.data(), p.pk_ph_tmp, draughts::kPkSize);
-    std::memcpy(p.params.pk_pph_tmp, old_ph.data(), draughts::kPkSize);
-
     draughts::crypto::Sm2KeyPair ph_tmp;
     auto ph_pub = ph_tmp.public_key_raw();
     std::memcpy(p.pk_ph_tmp, ph_pub.data(), draughts::kPkSize);
+    if (response_flow) {
+        std::memcpy(p.params.pk_pph_tmp, ph_pub.data(), draughts::kPkSize);
+    } else {
+        std::memcpy(p.params.pk_pph_tmp, prev_ph.data(), draughts::kPkSize);
+    }
 
     if (!encrypt_params_for_next_hop(p, outnode_pub, ph_tmp)) {
         logger_.warn("failed to encrypt params for outnode");
