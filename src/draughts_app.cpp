@@ -13,8 +13,6 @@
 #include <iomanip>
 #include <sstream>
 
-#include <openssl/sha.h>
-#include <unistd.h>
 
 using boost::asio::ip::address_v4;
 
@@ -73,22 +71,6 @@ bool load_peer_info_file(const std::string& path, PeerInfoFile& out) {
         else if (key == "pubkey") out.pubkey = val;
     }
     return !out.peer_id.empty() && !out.bind_ip.empty() && out.draughts_port != 0 && !out.pubkey.empty();
-}
-
-std::string json_escape(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 8);
-    for (char c : s) {
-        switch (c) {
-            case '\\': out += "\\\\"; break;
-            case '"': out += "\\\""; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default: out.push_back(c); break;
-        }
-    }
-    return out;
 }
 
 } // namespace
@@ -184,7 +166,6 @@ bool DraughtsApp::start() {
         return false;
     }
 
-    init_trace();
     do_receive();
 
     auto tick = std::make_shared<std::function<void()>>();
@@ -223,118 +204,65 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
         return;
     }
 
-    address_v4 nh_addr;
-    uint16_t nh_port = 0;
-    draughts::crypto::PubKey nh_pub{};
-    address_v4 nnh_addr;
-    uint16_t nnh_port = 0;
-    draughts::crypto::PubKey nnh_pub{};
-    if (!pick_nh_nnh(nh_addr, nh_port, nh_pub, nnh_addr, nnh_port, nnh_pub, "")) {
-        console_.println("no active neighbors to start random walk");
-        logger_.warn("cli send failed: no active neighbors");
-        return;
-    }
-    std::string nh_peer_id;
-    if (auto nh_desc = node_.lookup_peer_by_draughts_endpoint(nh_addr, nh_port)) {
-        nh_peer_id = nh_desc->peer_id;
-    }
-    std::string nnh_peer_id;
-    if (auto nnh_desc = node_.lookup_peer_by_draughts_endpoint(nnh_addr, nnh_port)) {
-        nnh_peer_id = nnh_desc->peer_id;
-    }
-
-    draughts::DraughtsPacket p{};
-
-    // Session ID
-    random_session_id(p.session_id);
-    std::string sid = session_id_from_bytes(p.session_id);
-
-    // Per-hop key for the first hop (also seeds c_addr_real_receiver layers).
-    draughts::crypto::Sm2KeyPair ph_tmp;
-    auto ph_pub = ph_tmp.public_key_raw();
-    std::memcpy(p.pk_ph_tmp, ph_pub.data(), draughts::kPkSize);
-    std::memcpy(p.params.pk_pph_tmp, ph_pub.data(), draughts::kPkSize);
-
     // End-to-end init key (per-session) for initiator address + payload.
     draughts::crypto::Sm2KeyPair init_tmp;
-    auto init_pub = init_tmp.public_key_raw();
-    std::memcpy(p.params.pk_init_tmp, init_pub.data(), draughts::kPkSize);
+    std::array<uint8_t, draughts::kSessionIdSize> sid_bytes{};
+    std::string sid;
+    do {
+        random_session_id(sid_bytes.data());
+        sid = session_id_from_bytes(sid_bytes.data());
+    } while (initiator_sessions_.count(sid));
 
-    // Addresses
-    addr_to_bytes(nnh_addr, nnh_port, p.params.addr_nnh);
-    addr_to_bytes(resp_addr, resp_port, p.params.c_addr_real_receiver);
-    addr_to_bytes(address_v4::from_string(cfg_.bind_ip), cfg_.draughts_port, p.params.c_addr_real_sender);
-
-    // Layering rules for c_addr_real_receiver / c_addr_real_sender.
-    if (!transform_real_addr(p.params.c_addr_real_receiver, ph_tmp, nh_pub,
-                             "request_init_add_nh", "request", "c_addr_real_receiver",
-                             "encrypt",
-                             "ph_tmp_priv", "nh_pub",
-                             nh_peer_id,
-                             peer_label_for(nh_addr, nh_port),
-                             sid)) {
-        console_.println("failed to wrap c_addr_real_receiver for first hop");
-        logger_.warn("cli send failed: wrap c_addr_real_receiver (nh)");
-        return;
-    }
-    if (!transform_real_addr(p.params.c_addr_real_receiver, ph_tmp, nnh_pub,
-                             "request_init_add_nnh", "request", "c_addr_real_receiver",
-                             "encrypt",
-                             "ph_tmp_priv", "nnh_pub",
-                             nnh_peer_id,
-                             peer_label_for(nnh_addr, nnh_port),
-                             sid)) {
-        console_.println("failed to wrap c_addr_real_receiver for second hop");
-        logger_.warn("cli send failed: wrap c_addr_real_receiver (nnh)");
-        return;
-    }
-    if (!transform_real_addr(p.params.c_addr_real_sender, init_tmp, resp_pub,
-                             "init_encrypt", "request", "c_addr_real_sender",
-                             "encrypt",
-                             "init_tmp_priv", "responder_pub",
-                             resp_peer_id,
-                             peer_label_for(resp_addr, resp_port),
-                             sid)) {
-        console_.println("failed to wrap c_addr_real_sender for responder");
-        logger_.warn("cli send failed: wrap c_addr_real_sender");
-        return;
-    }
-
-    p.params.x = cfg_.ciplc_x0;
-    p.params.magic_num = cfg_.magic_num;
-
-    // Encrypt payload
-    std::uint8_t pt[draughts::kDataSize] = {};
-    encode_payload(text, pt);
-
-    auto secret = init_tmp.DeriveSharedSecret(resp_pub);
-    auto key_iv = draughts::crypto::Sm2KeyPair::DeriveKeyAndIv(secret);
-    std::memcpy(p.c_data, pt, draughts::kDataSize);
-    crypto::CommutativeCipher::TransformInPlace(p.c_data, draughts::kDataSize, key_iv.first, key_iv.second);
-
-    if (!encrypt_params_for_next_hop(p, nh_pub, ph_tmp)) {
-        console_.println("failed to encrypt params for first hop");
-        logger_.warn("cli send failed: encrypt params");
-        return;
-    }
+    InitiatorSession session{};
+    session.init_key = std::move(init_tmp);
+    session.resp_pub = resp_pub;
+    session.resp_addr = resp_addr;
+    session.resp_port = resp_port;
+    session.resp_peer_id = resp_peer_id;
+    session.last_used_ms = now_ms();
 
     initiator_session_ids_.insert(sid);
-    initiator_sessions_.emplace(sid, InitiatorSession{std::move(init_tmp), resp_pub, now_ms()});
+    auto [it, inserted] = initiator_sessions_.emplace(sid, std::move(session));
+    if (!inserted) {
+        console_.println("failed to create session (collision)");
+        logger_.warn("cli send failed: session collision");
+        initiator_session_ids_.erase(sid);
+        return;
+    }
 
-    logger_.info("cli send request session=" + session_hex(sid) +
-                 " responder=" + endpoint_to_string(resp_addr, resp_port) +
-                 " nh=" + endpoint_to_string(nh_addr, nh_port) +
-                 " nnh=" + endpoint_to_string(nnh_addr, nnh_port));
-
-    if (!send_packet_to(p, nh_addr, nh_port)) {
-        console_.println("failed to send packet to next hop");
-        logger_.warn("cli send failed session=" + session_hex(sid));
+    if (!send_request_with_session(sid, it->second, text)) {
         initiator_session_ids_.erase(sid);
         initiator_sessions_.erase(sid);
         return;
     }
+}
 
-    console_.println("sent session=" + session_hex(sid) + " to responder=" + endpoint_to_string(resp_addr, resp_port));
+void DraughtsApp::cmd_send_session(const std::string& session_hex_in, const std::string& text) {
+    if (session_hex_in.empty() || text.empty()) {
+        console_.println("usage: send_session <session_hex> <text>");
+        return;
+    }
+    logger_.info("cli send_session session=" + session_hex_in + " text_len=" + std::to_string(text.size()));
+
+    std::string sid;
+    if (!parse_session_hex(session_hex_in, sid)) {
+        console_.println("invalid session hex");
+        logger_.warn("cli send_session failed: invalid session_hex");
+        return;
+    }
+
+    auto it = initiator_sessions_.find(sid);
+    if (it == initiator_sessions_.end()) {
+        console_.println("unknown session id");
+        logger_.warn("cli send_session failed: unknown session id " + session_hex_in);
+        return;
+    }
+    initiator_session_ids_.insert(sid);
+
+    if (!send_request_with_session(sid, it->second, text)) {
+        logger_.warn("cli send_session failed session=" + session_hex(sid));
+        return;
+    }
 }
 
 void DraughtsApp::cmd_inbox() {
@@ -371,20 +299,9 @@ void DraughtsApp::cmd_reply(const std::string& session_hex_in, const std::string
     logger_.info("cli reply session=" + session_hex_in + " text_len=" + std::to_string(text.size()));
 
     std::string sid;
-    if (session_hex_in.size() % 2 != 0) {
-        console_.println("session_hex must have even length");
-        logger_.warn("cli reply failed: invalid session_hex length");
-        return;
-    }
-    sid.resize(session_hex_in.size() / 2);
-    try {
-        for (size_t i = 0; i < session_hex_in.size(); i += 2) {
-            auto byte = std::stoi(session_hex_in.substr(i, 2), nullptr, 16);
-            sid[i / 2] = static_cast<char>(byte & 0xFF);
-        }
-    } catch (...) {
+    if (!parse_session_hex(session_hex_in, sid)) {
         console_.println("invalid session hex");
-        logger_.warn("cli reply failed: invalid session_hex format");
+        logger_.warn("cli reply failed: invalid session_hex");
         return;
     }
 
@@ -495,8 +412,7 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
             logger_.info("recv reply session=" + session_hex(sid));
             inbox_.push_back(InboxItem{true, session_hex(sid), text, ""});
             console_.println("[REPLY] session=" + session_hex(sid) + " text=\"" + text + "\"");
-            initiator_sessions_.erase(it);
-            initiator_session_ids_.erase(sid);
+            it->second.last_used_ms = now_ms();
             return;
         }
         if (initiator_session_ids_.count(sid)) {
@@ -518,13 +434,7 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
 
         std::array<std::uint8_t, draughts::kAddrSize> c_addr_real_sender{};
         std::memcpy(c_addr_real_sender.data(), p.params.c_addr_real_sender, draughts::kAddrSize);
-        if (!transform_real_addr(c_addr_real_sender.data(), identity_, pk_init,
-                                      "responder_decrypt_init", "request", "c_addr_real_sender",
-                                      "decrypt",
-                                      "identity_priv", "packet.pk_init_tmp",
-                                      "",
-                                      "packet.pk_init_tmp",
-                                      sid)) {
+        if (!transform_real_addr(c_addr_real_sender.data(), identity_, pk_init)) {
             logger_.warn("failed to decrypt c_addr_real_sender at responder");
             return;
         }
@@ -583,15 +493,7 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
         auto ph_pub = ph_tmp.public_key_raw();
         std::memcpy(p.pk_ph_tmp, ph_pub.data(), draughts::kPkSize);
 
-        auto nnh_desc = node_.lookup_peer_by_draughts_endpoint(nnh_addr, nnh_port);
-        std::string nnh_peer_id = nnh_desc ? nnh_desc->peer_id : "";
-        if (!transform_real_addr(p.params.c_addr_real_receiver, ph_tmp, nnh_pub,
-                                 "response_first_hop_add", "response", "c_addr_real_receiver",
-                                 "encrypt",
-                                 "ph_tmp_priv", "res_out_pub",
-                                 nnh_peer_id,
-                                 peer_label_for(nnh_addr, nnh_port),
-                                 sid)) {
+        if (!transform_real_addr(p.params.c_addr_real_receiver, ph_tmp, nnh_pub)) {
             logger_.warn("failed to add layer to c_addr_real_receiver at response first hop");
             return;
         }
@@ -635,26 +537,14 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
         if (response_flow) {
             draughts::crypto::PubKey pk_pph{};
             std::memcpy(pk_pph.data(), p.params.pk_pph_tmp, draughts::kPkSize);
-            if (!transform_real_addr(p.params.c_addr_real_receiver, identity_, pk_pph,
-                                          "response_outnode_peel", "response", "c_addr_real_receiver",
-                                          "decrypt",
-                                          "identity_priv", "packet.pk_pph_tmp",
-                                          peer_id_for_pubkey(pk_pph),
-                                          "packet.pk_pph_tmp",
-                                          sid)) {
+            if (!transform_real_addr(p.params.c_addr_real_receiver, identity_, pk_pph)) {
                 logger_.warn("failed to peel c_addr_real_receiver at outnode");
                 return;
             }
         } else {
             draughts::crypto::PubKey pk_pph{};
             std::memcpy(pk_pph.data(), p.params.pk_pph_tmp, draughts::kPkSize);
-            if (!transform_real_addr(p.params.c_addr_real_receiver, identity_, pk_pph,
-                                     "request_outnode_peel", "request", "c_addr_real_receiver",
-                                     "decrypt",
-                                     "identity_priv", "packet.pk_pph_tmp",
-                                     from_peer_id,
-                                     "packet.pk_pph_tmp",
-                                     sid)) {
+            if (!transform_real_addr(p.params.c_addr_real_receiver, identity_, pk_pph)) {
                 logger_.warn("failed to peel c_addr_real_receiver at outnode");
                 return;
             }
@@ -742,23 +632,11 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
         std::memcpy(p.pk_ph_tmp, ph_pub.data(), draughts::kPkSize);
 
         if (!response_flow) {
-            if (!transform_real_addr(p.params.c_addr_real_receiver, identity_, pk_pph,
-                                     "request_relay_peel", "request", "c_addr_real_receiver",
-                                     "decrypt",
-                                     "identity_priv", "packet.pk_pph_tmp",
-                                     from_peer_id,
-                                     "packet.pk_pph_tmp",
-                                     sid)) {
+            if (!transform_real_addr(p.params.c_addr_real_receiver, identity_, pk_pph)) {
                 logger_.warn("failed to peel c_addr_real_receiver at relay");
                 return;
             }
-            if (!transform_real_addr(p.params.c_addr_real_receiver, identity_, nnh_pub,
-                                     "request_relay_add", "request", "c_addr_real_receiver",
-                                     "encrypt",
-                                     "identity_priv", "nnh_pub",
-                                     nnh_peer_id,
-                                     peer_label_for(nnh_addr, nnh_port),
-                                     sid)) {
+            if (!transform_real_addr(p.params.c_addr_real_receiver, identity_, nnh_pub)) {
                 logger_.warn("failed to add layer to c_addr_real_receiver at relay");
                 return;
             }
@@ -831,36 +709,16 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     draughts::crypto::PubKey pk_pph{};
     std::memcpy(pk_pph.data(), p.params.pk_pph_tmp, draughts::kPkSize);
     if (response_flow) {
-        if (!transform_real_addr(p.params.c_addr_real_receiver, identity_, pk_pph,
-                                      "response_exit_peel", "response", "c_addr_real_receiver",
-                                      "decrypt",
-                                      "identity_priv", "packet.pk_pph_tmp",
-                                      peer_id_for_pubkey(pk_pph),
-                                      "packet.pk_pph_tmp",
-                                      sid)) {
+        if (!transform_real_addr(p.params.c_addr_real_receiver, identity_, pk_pph)) {
             logger_.warn("failed to peel c_addr_real_receiver at response exit");
             return;
         }
     } else {
-        if (!transform_real_addr(p.params.c_addr_real_receiver, identity_, pk_pph,
-                                 "request_exit_peel", "request", "c_addr_real_receiver",
-                                 "decrypt",
-                                 "identity_priv", "packet.pk_pph_tmp",
-                                 from_peer_id,
-                                 "packet.pk_pph_tmp",
-                                 sid)) {
+        if (!transform_real_addr(p.params.c_addr_real_receiver, identity_, pk_pph)) {
             logger_.warn("failed to peel c_addr_real_receiver at exit");
             return;
         }
-        auto nnh_desc = node_.lookup_peer_by_draughts_endpoint(nnh_addr, nnh_port);
-        std::string nnh_peer_id = nnh_desc ? nnh_desc->peer_id : "";
-        if (!transform_real_addr(p.params.c_addr_real_sender, ph_tmp, nnh_pub,
-                                      "request_exit_add", "request", "c_addr_real_sender",
-                                      "encrypt",
-                                      "ph_tmp_priv", "res2nd_pub",
-                                      nnh_peer_id,
-                                      peer_label_for(nnh_addr, nnh_port),
-                                      sid)) {
+        if (!transform_real_addr(p.params.c_addr_real_sender, ph_tmp, nnh_pub)) {
             logger_.warn("failed to add layer to c_addr_real_sender at exit (request)");
             return;
         }
@@ -926,119 +784,10 @@ std::string DraughtsApp::peer_label_for(const address_v4& addr, uint16_t port) c
     return ep;
 }
 
-void DraughtsApp::init_trace() {
-    if (trace_ready_) return;
-    if (cfg_.peer_id.empty()) return;
-    try {
-        namespace fs = std::filesystem;
-        fs::create_directories("trace");
-        trace_dir_ = "trace/" + cfg_.peer_id + "_" + std::to_string(::getpid()) + "_" + std::to_string(now_ms());
-        fs::create_directories(trace_dir_ + "/keys");
-        trace_out_.open(trace_dir_ + "/trace.log", std::ios::out | std::ios::app);
-        trace_ready_ = trace_out_.is_open();
-    } catch (...) {
-        trace_ready_ = false;
-    }
-}
-
-std::string DraughtsApp::trace_store_key(const std::string& pem, const std::string& prefix) {
-    if (!trace_ready_ || pem.empty()) return "";
-    unsigned char digest[SHA256_DIGEST_LENGTH];
-    SHA256(reinterpret_cast<const unsigned char*>(pem.data()), pem.size(), digest);
-    std::ostringstream hex;
-    for (auto b : digest) {
-        hex << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
-    }
-    std::string key = prefix + "_" + hex.str();
-    auto it = trace_key_cache_.find(key);
-    if (it != trace_key_cache_.end()) return it->second;
-
-    std::string rel = "keys/" + key + ".pem";
-    std::string path = trace_dir_ + "/" + rel;
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (out.is_open()) {
-        out << pem;
-        out.close();
-        trace_key_cache_[key] = rel;
-        return rel;
-    }
-    return "";
-}
-
-std::string DraughtsApp::trace_store_pub_raw(const draughts::crypto::PubKey& raw) {
-    try {
-        auto pem = draughts::crypto::Sm2KeyPair::PublicKeyPemFromRaw(raw);
-        return trace_store_key(pem, "pub");
-    } catch (...) {
-        return "";
-    }
-}
-
-void DraughtsApp::trace_real_addr_transform(const char* stage,
-                                            const char* flow,
-                                            const char* field,
-                                            const char* op,
-                                            const char* priv_role,
-                                            const char* peer_role,
-                                            const std::string& peer_id,
-                                            const std::string& peer_label,
-                                            const std::string& sid,
-                                            const std::uint8_t before[draughts::kAddrSize],
-                                            const std::uint8_t after[draughts::kAddrSize],
-                                            const draughts::crypto::Sm2KeyPair& priv_key,
-                                            const draughts::crypto::PubKey& peer_pub) {
-    if (!trace_ready_) return;
-    std::lock_guard<std::mutex> lk(trace_mu_);
-    std::string priv_pem;
-    try {
-        priv_pem = priv_key.PrivateKeyPem();
-    } catch (...) {
-        return;
-    }
-    std::string priv_file = trace_store_key(priv_pem, "priv");
-    std::string pub_file = trace_store_pub_raw(peer_pub);
-    std::string before_hex = bytes_to_hex(before, draughts::kAddrSize);
-    std::string after_hex = bytes_to_hex(after, draughts::kAddrSize);
-    trace_out_ << "{"
-               << "\"ts_ms\":" << now_ms() << ","
-               << "\"node_id\":\"" << json_escape(cfg_.peer_id) << "\","
-               << "\"session\":\"" << session_hex(sid) << "\","
-               << "\"flow\":\"" << flow << "\","
-               << "\"stage\":\"" << stage << "\","
-               << "\"field\":\"" << field << "\","
-               << "\"op\":\"" << json_escape(op ? op : "") << "\","
-               << "\"priv_role\":\"" << json_escape(priv_role ? priv_role : "") << "\","
-               << "\"peer_role\":\"" << json_escape(peer_role ? peer_role : "") << "\","
-               << "\"peer_id\":\"" << json_escape(peer_id) << "\","
-               << "\"peer_label\":\"" << json_escape(peer_label) << "\","
-               << "\"before\":\"" << before_hex << "\","
-               << "\"after\":\"" << after_hex << "\","
-               << "\"priv_key\":\"" << priv_file << "\","
-               << "\"peer_pub\":\"" << pub_file << "\""
-               << "}\n";
-    trace_out_.flush();
-}
-
 bool DraughtsApp::transform_real_addr(std::uint8_t addr[draughts::kAddrSize],
                                       const draughts::crypto::Sm2KeyPair& priv_key,
-                                      const draughts::crypto::PubKey& peer_pub,
-                                      const char* stage,
-                                      const char* flow,
-                                      const char* field,
-                                      const char* op,
-                                      const char* priv_role,
-                                      const char* peer_role,
-                                      const std::string& peer_id,
-                                      const std::string& peer_label,
-                                      const std::string& sid) {
-    std::array<std::uint8_t, draughts::kAddrSize> before{};
-    std::memcpy(before.data(), addr, draughts::kAddrSize);
-    if (!transform_addr_layer(addr, priv_key, peer_pub)) return false;
-    std::array<std::uint8_t, draughts::kAddrSize> after{};
-    std::memcpy(after.data(), addr, draughts::kAddrSize);
-    trace_real_addr_transform(stage, flow, field, op, priv_role, peer_role, peer_id, peer_label,
-                              sid, before.data(), after.data(), priv_key, peer_pub);
-    return true;
+                                      const draughts::crypto::PubKey& peer_pub) {
+    return transform_addr_layer(addr, priv_key, peer_pub);
 }
 
 bool DraughtsApp::pick_nh_nnh(address_v4& nh_addr,
@@ -1101,6 +850,21 @@ bool DraughtsApp::pick_nnh_for_peer_id(const std::string& nh_peer_id,
 
 std::string DraughtsApp::session_hex(const std::string& sid) {
     return bytes_to_hex(reinterpret_cast<const uint8_t*>(sid.data()), sid.size());
+}
+
+bool DraughtsApp::parse_session_hex(const std::string& session_hex_in, std::string& sid) {
+    if (session_hex_in.size() != draughts::kSessionIdSize * 2) return false;
+    if (session_hex_in.size() % 2 != 0) return false;
+    sid.resize(session_hex_in.size() / 2);
+    try {
+        for (size_t i = 0; i < session_hex_in.size(); i += 2) {
+            auto byte = std::stoi(session_hex_in.substr(i, 2), nullptr, 16);
+            sid[i / 2] = static_cast<char>(byte & 0xFF);
+        }
+    } catch (...) {
+        return false;
+    }
+    return true;
 }
 
 std::string DraughtsApp::bytes_to_hex(const uint8_t* data, size_t len) {
@@ -1211,24 +975,6 @@ bool DraughtsApp::get_peer_pubkey_by_endpoint(const address_v4& addr,
     return true;
 }
 
-std::string DraughtsApp::peer_id_for_pubkey(const draughts::crypto::PubKey& pub) const {
-    auto peers = node_.all_peers();
-    for (const auto& d : peers) {
-        if (d.pubkey.empty()) continue;
-        std::vector<uint8_t> raw;
-        try {
-            raw = b64::decode(d.pubkey);
-        } catch (...) {
-            continue;
-        }
-        if (raw.size() != draughts::kPkSize) continue;
-        if (std::memcmp(raw.data(), pub.data(), draughts::kPkSize) == 0) {
-            return d.peer_id;
-        }
-    }
-    return "";
-}
-
 bool DraughtsApp::resolve_peer_target(const std::string& dest,
                                       address_v4& out_addr,
                                       uint16_t& out_port,
@@ -1309,10 +1055,90 @@ bool DraughtsApp::resolve_peer_target(const std::string& dest,
     return false;
 }
 
+bool DraughtsApp::send_request_with_session(const std::string& sid,
+                                            InitiatorSession& session,
+                                            const std::string& text) {
+    address_v4 nh_addr;
+    uint16_t nh_port = 0;
+    draughts::crypto::PubKey nh_pub{};
+    address_v4 nnh_addr;
+    uint16_t nnh_port = 0;
+    draughts::crypto::PubKey nnh_pub{};
+    if (!pick_nh_nnh(nh_addr, nh_port, nh_pub, nnh_addr, nnh_port, nnh_pub, "")) {
+        console_.println("no active neighbors to start random walk");
+        logger_.warn("cli send failed: no active neighbors");
+        return false;
+    }
+
+    draughts::DraughtsPacket p{};
+    std::memcpy(p.session_id, sid.data(), draughts::kSessionIdSize);
+
+    draughts::crypto::Sm2KeyPair ph_tmp;
+    auto ph_pub = ph_tmp.public_key_raw();
+    std::memcpy(p.pk_ph_tmp, ph_pub.data(), draughts::kPkSize);
+    std::memcpy(p.params.pk_pph_tmp, ph_pub.data(), draughts::kPkSize);
+
+    auto init_pub = session.init_key.public_key_raw();
+    std::memcpy(p.params.pk_init_tmp, init_pub.data(), draughts::kPkSize);
+
+    addr_to_bytes(nnh_addr, nnh_port, p.params.addr_nnh);
+    addr_to_bytes(session.resp_addr, session.resp_port, p.params.c_addr_real_receiver);
+    addr_to_bytes(address_v4::from_string(cfg_.bind_ip), cfg_.draughts_port, p.params.c_addr_real_sender);
+
+    if (!transform_real_addr(p.params.c_addr_real_receiver, ph_tmp, nh_pub)) {
+        console_.println("failed to wrap c_addr_real_receiver for first hop");
+        logger_.warn("cli send failed: wrap c_addr_real_receiver (nh)");
+        return false;
+    }
+    if (!transform_real_addr(p.params.c_addr_real_receiver, ph_tmp, nnh_pub)) {
+        console_.println("failed to wrap c_addr_real_receiver for second hop");
+        logger_.warn("cli send failed: wrap c_addr_real_receiver (nnh)");
+        return false;
+    }
+    if (!transform_real_addr(p.params.c_addr_real_sender, session.init_key, session.resp_pub)) {
+        console_.println("failed to wrap c_addr_real_sender for responder");
+        logger_.warn("cli send failed: wrap c_addr_real_sender");
+        return false;
+    }
+
+    p.params.x = cfg_.ciplc_x0;
+    p.params.magic_num = cfg_.magic_num;
+
+    std::uint8_t pt[draughts::kDataSize] = {};
+    encode_payload(text, pt);
+
+    auto secret = session.init_key.DeriveSharedSecret(session.resp_pub);
+    auto key_iv = draughts::crypto::Sm2KeyPair::DeriveKeyAndIv(secret);
+    std::memcpy(p.c_data, pt, draughts::kDataSize);
+    crypto::CommutativeCipher::TransformInPlace(p.c_data, draughts::kDataSize, key_iv.first, key_iv.second);
+
+    if (!encrypt_params_for_next_hop(p, nh_pub, ph_tmp)) {
+        console_.println("failed to encrypt params for first hop");
+        logger_.warn("cli send failed: encrypt params");
+        return false;
+    }
+
+    logger_.info("cli send request session=" + session_hex(sid) +
+                 " responder=" + endpoint_to_string(session.resp_addr, session.resp_port) +
+                 " nh=" + endpoint_to_string(nh_addr, nh_port) +
+                 " nnh=" + endpoint_to_string(nnh_addr, nnh_port));
+
+    if (!send_packet_to(p, nh_addr, nh_port)) {
+        console_.println("failed to send packet to next hop");
+        logger_.warn("cli send failed session=" + session_hex(sid));
+        return false;
+    }
+
+    session.last_used_ms = now_ms();
+    console_.println("sent session=" + session_hex(sid) +
+                     " to responder=" + endpoint_to_string(session.resp_addr, session.resp_port));
+    return true;
+}
+
 void DraughtsApp::prune_sessions() {
     uint64_t now = now_ms();
     for (auto it = initiator_sessions_.begin(); it != initiator_sessions_.end(); ) {
-        if (now - it->second.created_ms > cfg_.session_ttl_ms) {
+        if (now - it->second.last_used_ms > cfg_.session_ttl_ms) {
             initiator_session_ids_.erase(it->first);
             it = initiator_sessions_.erase(it);
         } else {

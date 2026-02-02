@@ -34,6 +34,7 @@ static void print_help(Console& c) {
     c.println("  inbox                        list received messages");
     c.println("  requests                     list pending responder sessions");
     c.println("  send <peer_id|ipv4:port> <text> send message to responder");
+    c.println("  send_session <session_hex> <text> send message using existing session");
     c.println("  reply <session_hex> <text>    reply to a received request");
     c.println("  quit                          exit");
 }
@@ -163,6 +164,19 @@ void Cli::run() {
                 continue;
             }
             boost::asio::post(io_, [this, ipv4, rest]{ app_.cmd_send(ipv4, rest); });
+            continue;
+        }
+        if (cmd == "send_session") {
+            std::string sid;
+            iss >> sid;
+            std::string rest;
+            std::getline(iss, rest);
+            rest = trim_ws(rest);
+            if (sid.empty() || rest.empty()) {
+                console_.println("usage: send_session <session_hex> <text>");
+                continue;
+            }
+            boost::asio::post(io_, [this, sid, rest]{ app_.cmd_send_session(sid, rest); });
             continue;
         }
 

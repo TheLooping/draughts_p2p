@@ -9,7 +9,6 @@ neighbors/
 peers/
 keys/
 topology/
-trace/
 
 # Logs and outputs
 *.log

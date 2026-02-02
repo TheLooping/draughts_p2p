@@ -5,9 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <deque>
-#include <fstream>
 #include <list>
-#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -35,6 +33,7 @@ public:
 
     // CLI actions
     void cmd_send(const std::string& dest, const std::string& text);
+    void cmd_send_session(const std::string& session_hex, const std::string& text);
     void cmd_inbox();
     void cmd_requests();
     void cmd_reply(const std::string& session_hex, const std::string& text);
@@ -52,7 +51,10 @@ private:
     struct InitiatorSession {
         draughts::crypto::Sm2KeyPair init_key;
         draughts::crypto::PubKey resp_pub{};
-        uint64_t created_ms = 0;
+        boost::asio::ip::address_v4 resp_addr;
+        uint16_t resp_port = 0;
+        std::string resp_peer_id;
+        uint64_t last_used_ms = 0;
     };
 
     struct ResponderValue {
@@ -101,34 +103,9 @@ private:
                                      const draughts::crypto::PubKey& next_pubkey,
                                      const draughts::crypto::Sm2KeyPair& ph_keypair);
     std::string peer_label_for(const boost::asio::ip::address_v4& addr, uint16_t port) const;
-    void init_trace();
-    std::string trace_store_key(const std::string& pem, const std::string& prefix);
-    std::string trace_store_pub_raw(const draughts::crypto::PubKey& raw);
-    void trace_real_addr_transform(const char* stage,
-                                   const char* flow,
-                                   const char* field,
-                                   const char* op,
-                                   const char* priv_role,
-                                   const char* peer_role,
-                                   const std::string& peer_id,
-                                   const std::string& peer_label,
-                                   const std::string& sid,
-                                   const std::uint8_t before[draughts::kAddrSize],
-                                   const std::uint8_t after[draughts::kAddrSize],
-                                   const draughts::crypto::Sm2KeyPair& priv_key,
-                                   const draughts::crypto::PubKey& peer_pub);
     bool transform_real_addr(std::uint8_t addr[draughts::kAddrSize],
                              const draughts::crypto::Sm2KeyPair& priv_key,
-                             const draughts::crypto::PubKey& peer_pub,
-                             const char* stage,
-                             const char* flow,
-                             const char* field,
-                             const char* op,
-                             const char* priv_role,
-                             const char* peer_role,
-                             const std::string& peer_id,
-                             const std::string& peer_label,
-                             const std::string& sid);
+                             const draughts::crypto::PubKey& peer_pub);
 
     bool send_packet_to(const draughts::DraughtsPacket& p,
                         const boost::asio::ip::address_v4& addr,
@@ -148,6 +125,7 @@ private:
                               draughts::crypto::PubKey& nnh_pub);
 
     static std::string session_hex(const std::string& sid);
+    static bool parse_session_hex(const std::string& session_hex, std::string& sid);
     static std::string bytes_to_hex(const uint8_t* data, size_t len);
 
     static std::string addr_to_string(const boost::asio::ip::address_v4& addr);
@@ -170,13 +148,15 @@ private:
     bool get_peer_pubkey_by_endpoint(const boost::asio::ip::address_v4& addr,
                                      uint16_t port,
                                      draughts::crypto::PubKey& out_pubkey) const;
-    std::string peer_id_for_pubkey(const draughts::crypto::PubKey& pub) const;
     bool resolve_peer_target(const std::string& dest,
                              boost::asio::ip::address_v4& out_addr,
                              uint16_t& out_port,
                              draughts::crypto::PubKey& out_pubkey,
                              std::string& out_peer_id) const;
 
+    bool send_request_with_session(const std::string& sid,
+                                   InitiatorSession& session,
+                                   const std::string& text);
     void prune_sessions();
 
 private:
@@ -193,11 +173,6 @@ private:
 
     std::unordered_set<std::string> initiator_session_ids_;
     std::unordered_map<std::string, InitiatorSession> initiator_sessions_;
-    std::ofstream trace_out_;
-    std::mutex trace_mu_;
-    std::unordered_map<std::string, std::string> trace_key_cache_;
-    std::string trace_dir_;
-    bool trace_ready_ = false;
     ResponderLru responder_lru_;
 
     std::vector<InboxItem> inbox_;
