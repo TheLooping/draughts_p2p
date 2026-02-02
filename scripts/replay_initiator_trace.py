@@ -110,18 +110,24 @@ def main() -> int:
         stage = entry.get("stage", "")
         flow = entry.get("flow", "")
         field = entry.get("field", "")
+        op = entry.get("op", "")
         sid = entry.get("session", "")
         priv_role = entry.get("priv_role", "")
         peer_role = entry.get("peer_role", "")
+        peer_id = entry.get("peer_id", "")
         peer_label = entry.get("peer_label", "")
 
         match = ""
         if after_hex:
             match = "OK" if after_hex.lower() == comp_hex.lower() else "MISMATCH"
 
-        print(f"[{idx}] {flow}/{stage} {field} session={sid}")
-        if priv_role or peer_role or peer_label:
-            print(f"  keys    : priv={priv_role} peer={peer_role} label={peer_label}")
+        peer_tag = peer_id or peer_label or "unknown"
+        header = f"[{idx}] {field} {op} peer={peer_tag} session={sid}"
+        if stage:
+            header += f" stage={stage}"
+        print(header)
+        if priv_role or peer_role:
+            print(f"  keyrole : priv={priv_role} peer={peer_role}")
         print(f"  priv_pem: {priv_rel}")
         print(f"  peer_pem: {pub_rel}")
         print(f"  before  : {before_hex}")

@@ -270,7 +270,9 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
     }
     if (!transform_initiator_addr(p.params.c_addr_init, init_tmp, resp_pub,
                                   "init_encrypt", "request", "c_addr_init",
+                                  "encrypt",
                                   "init_tmp_priv", "responder_pub",
+                                  resp_peer_id,
                                   peer_label_for(resp_addr, resp_port),
                                   sid)) {
         console_.println("failed to wrap c_addr_init for responder");
@@ -498,7 +500,9 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
         std::memcpy(c_addr_init.data(), p.params.c_addr_init, draughts::kAddrSize);
         if (!transform_initiator_addr(c_addr_init.data(), identity_, pk_init,
                                       "responder_decrypt_init", "request", "c_addr_init",
+                                      "decrypt",
                                       "identity_priv", "packet.pk_init_tmp",
+                                      "",
                                       "packet.pk_init_tmp",
                                       sid)) {
             logger_.warn("failed to decrypt c_addr_init at responder");
@@ -587,6 +591,8 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     std::string sid = session_id_from_bytes(p.session_id);
     bool response_flow = draughts::is_zero_addr(p.params.c_addr_init);
     bool response_first_hop = response_flow && (p.params.x < 0.0);
+    auto from_desc = node_.lookup_peer_by_draughts_endpoint(from.address().to_v4(), from.port());
+    std::string from_peer_id = from_desc ? from_desc->peer_id : "";
 
     if (approx_eq(p.params.x, 0.0)) {
         if (is_zero_pk_bytes(p.params.pk_pph_tmp) || draughts::is_exit_pk(p.params.pk_pph_tmp)) {
@@ -596,9 +602,16 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
         draughts::crypto::PubKey pk_pph{};
         std::memcpy(pk_pph.data(), p.params.pk_pph_tmp, draughts::kPkSize);
         if (response_flow) {
-            if (!transform_initiator_addr(p.params.c_addr_resp, identity_, pk_pph,
+            draughts::crypto::PubKey prev_pub{};
+            if (!get_peer_pubkey_by_endpoint(from.address().to_v4(), from.port(), prev_pub)) {
+                logger_.warn("response outnode missing prev hop pubkey");
+                return;
+            }
+            if (!transform_initiator_addr(p.params.c_addr_resp, identity_, prev_pub,
                                           "response_outnode_peel", "response", "c_addr_resp",
-                                          "identity_priv", "packet.pk_pph_tmp",
+                                          "decrypt",
+                                          "identity_priv", "prev_hop_pub",
+                                          from_peer_id,
                                           peer_label_for(from.address().to_v4(), from.port()),
                                           sid)) {
                 logger_.warn("failed to peel c_addr_resp at outnode");
@@ -656,7 +669,6 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     }
 
     std::string exclude_peer_id;
-    auto from_desc = node_.lookup_peer_by_draughts_endpoint(from.address().to_v4(), from.port());
     if (from_desc) exclude_peer_id = from_desc->peer_id;
 
     if (do_continue) {
@@ -691,16 +703,7 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
         auto ph_pub = ph_tmp.public_key_raw();
         std::memcpy(p.pk_ph_tmp, ph_pub.data(), draughts::kPkSize);
 
-        if (response_flow) {
-            if (!transform_initiator_addr(p.params.c_addr_resp, ph_tmp, nnh_pub,
-                                          "response_first_hop_add", "response", "c_addr_resp",
-                                          "ph_tmp_priv", "res_out_pub",
-                                          peer_label_for(nnh_addr, nnh_port),
-                                          sid)) {
-                logger_.warn("failed to add layer to c_addr_resp at response first hop");
-                return;
-            }
-        } else {
+        if (!response_flow) {
             if (!transform_addr_layer(p.params.c_addr_resp, identity_, pk_pph)) {
                 logger_.warn("failed to peel c_addr_resp at relay");
                 return;
@@ -780,10 +783,22 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     if (response_flow) {
         if (!transform_initiator_addr(p.params.c_addr_resp, identity_, pk_pph,
                                       "response_exit_peel", "response", "c_addr_resp",
+                                      "decrypt",
                                       "identity_priv", "packet.pk_pph_tmp",
-                                      peer_label_for(from.address().to_v4(), from.port()),
+                                      "",
+                                      "packet.pk_pph_tmp",
                                       sid)) {
             logger_.warn("failed to peel c_addr_resp at response exit");
+            return;
+        }
+        if (!transform_initiator_addr(p.params.c_addr_resp, identity_, outnode_pub,
+                                      "response_exit_add", "response", "c_addr_resp",
+                                      "encrypt",
+                                      "identity_priv", "res_out_pub",
+                                      outnode_peer_id,
+                                      peer_label_for(outnode_addr, outnode_port),
+                                      sid)) {
+            logger_.warn("failed to add layer to c_addr_resp at response exit");
             return;
         }
     } else {
@@ -791,9 +806,13 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
             logger_.warn("failed to peel c_addr_resp at exit");
             return;
         }
+        auto nnh_desc = node_.lookup_peer_by_draughts_endpoint(nnh_addr, nnh_port);
+        std::string nnh_peer_id = nnh_desc ? nnh_desc->peer_id : "";
         if (!transform_initiator_addr(p.params.c_addr_init, ph_tmp, nnh_pub,
                                       "request_exit_add", "request", "c_addr_init",
+                                      "encrypt",
                                       "ph_tmp_priv", "res2nd_pub",
+                                      nnh_peer_id,
                                       peer_label_for(nnh_addr, nnh_port),
                                       sid)) {
             logger_.warn("failed to add layer to c_addr_init at exit (request)");
@@ -804,6 +823,8 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     p.params.x = 0.0;
     if (!response_flow) {
         addr_to_bytes(nnh_addr, nnh_port, p.params.addr_nnh);
+    } else {
+        draughts::zero_addr(p.params.addr_nnh);
     }
 
     std::memcpy(p.pk_ph_tmp, ph_pub.data(), draughts::kPkSize);
@@ -910,8 +931,10 @@ std::string DraughtsApp::trace_store_pub_raw(const draughts::crypto::PubKey& raw
 void DraughtsApp::trace_initiator_transform(const char* stage,
                                             const char* flow,
                                             const char* field,
+                                            const char* op,
                                             const char* priv_role,
                                             const char* peer_role,
+                                            const std::string& peer_id,
                                             const std::string& peer_label,
                                             const std::string& sid,
                                             const std::uint8_t before[draughts::kAddrSize],
@@ -937,8 +960,10 @@ void DraughtsApp::trace_initiator_transform(const char* stage,
                << "\"flow\":\"" << flow << "\","
                << "\"stage\":\"" << stage << "\","
                << "\"field\":\"" << field << "\","
+               << "\"op\":\"" << json_escape(op ? op : "") << "\","
                << "\"priv_role\":\"" << json_escape(priv_role ? priv_role : "") << "\","
                << "\"peer_role\":\"" << json_escape(peer_role ? peer_role : "") << "\","
+               << "\"peer_id\":\"" << json_escape(peer_id) << "\","
                << "\"peer_label\":\"" << json_escape(peer_label) << "\","
                << "\"before\":\"" << before_hex << "\","
                << "\"after\":\"" << after_hex << "\","
@@ -954,8 +979,10 @@ bool DraughtsApp::transform_initiator_addr(std::uint8_t addr[draughts::kAddrSize
                                            const char* stage,
                                            const char* flow,
                                            const char* field,
+                                           const char* op,
                                            const char* priv_role,
                                            const char* peer_role,
+                                           const std::string& peer_id,
                                            const std::string& peer_label,
                                            const std::string& sid) {
     std::array<std::uint8_t, draughts::kAddrSize> before{};
@@ -963,7 +990,7 @@ bool DraughtsApp::transform_initiator_addr(std::uint8_t addr[draughts::kAddrSize
     if (!transform_addr_layer(addr, priv_key, peer_pub)) return false;
     std::array<std::uint8_t, draughts::kAddrSize> after{};
     std::memcpy(after.data(), addr, draughts::kAddrSize);
-    trace_initiator_transform(stage, flow, field, priv_role, peer_role, peer_label,
+    trace_initiator_transform(stage, flow, field, op, priv_role, peer_role, peer_id, peer_label,
                               sid, before.data(), after.data(), priv_key, peer_pub);
     return true;
 }
