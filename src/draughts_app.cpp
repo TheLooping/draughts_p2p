@@ -583,7 +583,20 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
         auto ph_pub = ph_tmp.public_key_raw();
         std::memcpy(p.pk_ph_tmp, ph_pub.data(), draughts::kPkSize);
 
-        p.params.x = -std::fabs(cfg_.ciplc_x0);
+        auto nnh_desc = node_.lookup_peer_by_draughts_endpoint(nnh_addr, nnh_port);
+        std::string nnh_peer_id = nnh_desc ? nnh_desc->peer_id : "";
+        if (!transform_real_addr(p.params.c_addr_real_receiver, ph_tmp, nnh_pub,
+                                 "response_first_hop_add", "response", "c_addr_real_receiver",
+                                 "encrypt",
+                                 "ph_tmp_priv", "res_out_pub",
+                                 nnh_peer_id,
+                                 peer_label_for(nnh_addr, nnh_port),
+                                 sid)) {
+            logger_.warn("failed to add layer to c_addr_real_receiver at response first hop");
+            return;
+        }
+
+        p.params.x = std::fabs(cfg_.ciplc_x0);
         addr_to_bytes(nnh_addr, nnh_port, p.params.addr_nnh);
 
         if (!encrypt_params_for_next_hop(p, nh_pub, ph_tmp)) {
@@ -750,17 +763,6 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
                 return;
             }
             std::memcpy(p.params.pk_pph_tmp, old_ph.data(), draughts::kPkSize);
-        } else {
-            if (!transform_real_addr(p.params.c_addr_real_receiver, ph_tmp, nnh_pub,
-                                          "response_first_hop_add", "response", "c_addr_real_receiver",
-                                          "encrypt",
-                                          "ph_tmp_priv", "res_out_pub",
-                                          nnh_peer_id,
-                                          peer_label_for(nnh_addr, nnh_port),
-                                          sid)) {
-                logger_.warn("failed to add layer to c_addr_real_receiver at response first hop");
-                return;
-            }
         }
         addr_to_bytes(nnh_addr, nnh_port, p.params.addr_nnh);
 
