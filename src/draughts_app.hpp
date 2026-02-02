@@ -107,6 +107,9 @@ private:
     void trace_initiator_transform(const char* stage,
                                    const char* flow,
                                    const char* field,
+                                   const char* priv_role,
+                                   const char* peer_role,
+                                   const std::string& peer_label,
                                    const std::string& sid,
                                    const std::uint8_t before[draughts::kAddrSize],
                                    const std::uint8_t after[draughts::kAddrSize],
@@ -118,6 +121,9 @@ private:
                                   const char* stage,
                                   const char* flow,
                                   const char* field,
+                                  const char* priv_role,
+                                  const char* peer_role,
+                                  const std::string& peer_label,
                                   const std::string& sid);
 
     bool send_packet_to(const draughts::DraughtsPacket& p,
