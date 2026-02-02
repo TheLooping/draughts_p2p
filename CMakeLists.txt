@@ -19,7 +19,6 @@ add_executable(draughts_node
     src/node.cpp
     src/protocol.cpp
     src/tlv.cpp
-    src/view.cpp
     src/crypto/Crypto.cpp
 )
 
@@ -32,4 +31,3 @@ target_compile_definitions(draughts_node PRIVATE
 )
 
 target_link_libraries(draughts_node PRIVATE OpenSSL::Crypto pthread)
-

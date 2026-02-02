@@ -1,8 +1,8 @@
-# draughts_p2p（EC-P256 / HyParView / Draughts）
+# draughts_p2p（EC-P256 / Static Topology / Draughts）
 
 本项目是 **Draughts 匿名路由协议** 在去中心化 P2P 覆盖网络上的 C++17 原型实现，包含：
 
-- **静态拓扑**：基于 **UDP/IPv4** 的预生成邻接关系（不再考虑动态加入）。
+- **静态拓扑**：基于 **UDP/IPv4** 的预生成邻接关系（不考虑动态加入）。
 - **两跳邻居同步**：用于局部 NNH 选择。
 - **Draughts 随机游走路由**：带 **CIPLC** 路径长度控制。
 - **匿名请求/响应**：使用 **EC-P256 ECDH + HKDF + AES-CTR XOR**。
@@ -50,7 +50,6 @@ cmake --build . -j
 - `self_info_file`：节点自信息文件（地址/端口/公钥），供外部查询。
 - `peer_info_dir`：自信息文件目录，CLI 可用于解析 `peer_id`。
 - `identity_key_file`：EC P-256 私钥文件（PEM）。
-- `static_topology`：是否启用静态拓扑（推荐 true）。
 - `topology_dir`：拓扑文件目录（每节点 `.neighbors`）。
 
 ### 实验：单机 36 节点（CLI 为 node10/node20）
@@ -71,7 +70,7 @@ cd ..
 
 生成配置 + 密钥 + 静态拓扑：
 ```bash
-./scripts/gen_configs.py --count 36 --cli-nodes 10,20 --active-min 3 --active-max 5 --neighbor-set-k 5 --bind-ip 127.0.0.1
+./scripts/gen_configs.py --count 36 --cli-nodes 10,20 --active-min 3 --active-max 5 --bind-ip 127.0.0.1
 ```
 
 启动中继节点（每 1 秒一个，跳过 CLI 节点）：
@@ -131,7 +130,6 @@ peer_id = B
 bind_ip = 127.0.0.1
 overlay_port = 4001
 draughts_port = 5001
-bootstraps = 127.0.0.1:4000:5000
 ```
 
 终端 C（`config/c.conf`）：
@@ -140,13 +138,11 @@ peer_id = C
 bind_ip = 127.0.0.1
 overlay_port = 4002
 draughts_port = 5002
-bootstraps = 127.0.0.1:4000:5000
 ```
 
 说明：
-- `overlay_port` 用于 HyParView 维护通信。
+- `overlay_port` 作为节点元信息发布（静态拓扑下不用于动态维护通信）。
 - `draughts_port` 用于 Draughts 数据通信。
-- `bootstraps` 使用 `ipv4:overlay_port:draughts_port`。
 
 ---
 

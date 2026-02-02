@@ -84,7 +84,7 @@ int main(int argc, char** argv) {
 
     DraughtsNode node(io, cfg, self, logger, console);
     if (!node.start()) {
-        std::cerr << "failed to start node (overlay bind failed)\n";
+        std::cerr << "failed to start node (topology load failed)\n";
         return 2;
     }
 

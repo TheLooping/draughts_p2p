@@ -14,7 +14,6 @@ peer_id = {peer_id}
 bind_ip = {bind_ip}
 overlay_port = {overlay_port}
 draughts_port = {draughts_port}
-{bootstraps_line}
 log_file = {log_file}
 log_level = {log_level}
 cli_enabled = {cli_enabled}
@@ -22,24 +21,11 @@ active_neighbors_file = {neighbors_file}
 self_info_file = {self_info_file}
 peer_info_dir = {peer_info_dir}
 identity_key_file = {identity_key_file}
-static_topology = {static_topology}
 topology_dir = {topology_dir}
 
-# HyParView parameters
+# Static topology degree expectations
 active_min = {active_min}
 active_max = {active_max}
-passive_max = {passive_max}
-
-lease_ms = {lease_ms}
-keepalive_every_ms = {keepalive_every_ms}
-shuffle_every_ms = {shuffle_every_ms}
-repair_every_ms = {repair_every_ms}
-
-join_ttl = {join_ttl}
-shuffle_k = {shuffle_k}
-
-neighbor_set_every_ms = {neighbor_set_every_ms}
-neighbor_set_k = {neighbor_set_k}
 
 # CIPLC parameters
 ciplc_a = {ciplc_a}
@@ -52,9 +38,6 @@ ciplc_x0 = {ciplc_x0}
 magic_num = {magic_num}
 session_ttl_ms = {session_ttl_ms}
 outnode_ttl_ms = {outnode_ttl_ms}
-
-# Padding (overlay messages only)
-app_pad_to = {app_pad_to}
 """
 
 
@@ -72,17 +55,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--topology-dir", default="topology", help="directory for topology files")
     p.add_argument("--cli-count", type=int, default=0, help="how many nodes enable CLI (ignored if --cli-nodes set)")
     p.add_argument("--cli-nodes", default="10,20", help="comma-separated node indices to enable CLI")
-    p.add_argument("--bootstrap-count", type=int, default=1, help="how many seed nodes to include as bootstraps")
     p.add_argument("--active-min", type=int, default=3, help="minimum active neighbors / degree")
     p.add_argument("--active-max", type=int, default=5, help="maximum active neighbors / degree")
-    p.add_argument("--passive-max", type=int, default=80, help="maximum passive neighbors")
-    p.add_argument("--neighbor-set-k", type=int, default=8, help="neighbors advertised in neighbor_set")
-    p.add_argument("--neighbor-set-every-ms", type=int, default=5000, help="neighbor_set interval in ms")
-    p.add_argument("--dynamic-topology", dest="static_topology", action="store_false",
-                   help="use HyParView dynamic topology (bootstraps enabled)")
     p.add_argument("--force-keys", action="store_true", help="overwrite existing key files")
     p.add_argument("--seed", type=int, default=None, help="random seed for topology generation")
-    p.set_defaults(static_topology=True)
     return p.parse_args()
 
 
@@ -301,12 +277,6 @@ def main() -> None:
     keys_dir.mkdir(parents=True, exist_ok=True)
     topology_dir.mkdir(parents=True, exist_ok=True)
 
-    seed_count = min(args.bootstrap_count, args.count)
-    seeds = [
-        f"{args.bind_ip}:{args.overlay_base + i}:{args.draughts_base + i}"
-        for i in range(seed_count)
-    ]
-
     cli_nodes = set()
     if args.cli_nodes:
         for item in args.cli_nodes.split(","):
@@ -321,17 +291,15 @@ def main() -> None:
     node_ids = [f"node{i}" for i in range(1, args.count + 1)]
     rng = random.Random(args.seed)
 
-    adjacency: List[Set[int]] = [set() for _ in range(args.count)]
-    if args.static_topology:
-        adjacency = generate_connected_topology(args.count, args.active_min, args.active_max, rng)
-        adjacency_json = {node_ids[i]: [node_ids[j] for j in sorted(neigh)]
-                          for i, neigh in enumerate(adjacency)}
-        (topology_dir / "adjacency.json").write_text(json.dumps(adjacency_json, indent=2))
-        write_adjacency_matrix(node_ids, adjacency, topology_dir / "adjacency_matrix.csv")
-        for i, node in enumerate(node_ids):
-            path = topology_dir / f"{node}.neighbors"
-            neighbors = [node_ids[j] for j in sorted(adjacency[i])]
-            path.write_text("\n".join(neighbors) + "\n")
+    adjacency = generate_connected_topology(args.count, args.active_min, args.active_max, rng)
+    adjacency_json = {node_ids[i]: [node_ids[j] for j in sorted(neigh)]
+                      for i, neigh in enumerate(adjacency)}
+    (topology_dir / "adjacency.json").write_text(json.dumps(adjacency_json, indent=2))
+    write_adjacency_matrix(node_ids, adjacency, topology_dir / "adjacency_matrix.csv")
+    for i, node in enumerate(node_ids):
+        path = topology_dir / f"{node}.neighbors"
+        neighbors = [node_ids[j] for j in sorted(adjacency[i])]
+        path.write_text("\n".join(neighbors) + "\n")
 
     for i, peer_id in enumerate(node_ids, start=1):
         overlay_port = args.overlay_base + (i - 1)
@@ -356,22 +324,11 @@ def main() -> None:
             ])
         )
 
-        bootstraps = []
-        if not args.static_topology and i > 1:
-            for entry in seeds:
-                if entry.endswith(f":{overlay_port}:{draughts_port}"):
-                    continue
-                bootstraps.append(entry)
-        bootstraps_line = ""
-        if bootstraps:
-            bootstraps_line = "bootstraps = " + ",".join(bootstraps)
-
         content = DEFAULT_TEMPLATE.format(
             peer_id=peer_id,
             bind_ip=args.bind_ip,
             overlay_port=overlay_port,
             draughts_port=draughts_port,
-            bootstraps_line=bootstraps_line,
             log_file=log_file.as_posix(),
             log_level="info",
             cli_enabled=cli_enabled,
@@ -379,19 +336,9 @@ def main() -> None:
             self_info_file=self_info_file.as_posix(),
             peer_info_dir=peer_info_dir.as_posix(),
             identity_key_file=priv_path.as_posix(),
-            static_topology="true" if args.static_topology else "false",
             topology_dir=topology_dir.as_posix(),
             active_min=args.active_min,
             active_max=args.active_max,
-            passive_max=args.passive_max,
-            lease_ms=30000,
-            keepalive_every_ms=10000,
-            shuffle_every_ms=12000,
-            repair_every_ms=2000,
-            join_ttl=4,
-            shuffle_k=8,
-            neighbor_set_every_ms=args.neighbor_set_every_ms,
-            neighbor_set_k=args.neighbor_set_k,
             ciplc_a=1.0,
             ciplc_b=0.1,
             ciplc_c=3.0,
@@ -400,7 +347,6 @@ def main() -> None:
             magic_num="0x4452415547485453",
             session_ttl_ms=300000,
             outnode_ttl_ms=300000,
-            app_pad_to=0,
         )
         path = out_dir / f"{peer_id}.conf"
         path.write_text(content)
@@ -408,11 +354,8 @@ def main() -> None:
     print(f"generated {args.count} configs in {out_dir}")
     print(f"keys dir: {keys_dir}")
     print(f"peer info dir: {peer_info_dir}")
-    if args.static_topology:
-        print(f"topology dir: {topology_dir}")
-        print(f"adjacency matrix: {topology_dir / 'adjacency_matrix.csv'}")
-    else:
-        print("dynamic topology enabled (bootstraps)")
+    print(f"topology dir: {topology_dir}")
+    print(f"adjacency matrix: {topology_dir / 'adjacency_matrix.csv'}")
 
 
 if __name__ == "__main__":

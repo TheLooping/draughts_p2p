@@ -6,14 +6,12 @@
 #include <vector>
 #include <string>
 #include <optional>
-#include <array>
 #include <random>
 
 #include "config.hpp"
 #include "console.hpp"
 #include "logger.hpp"
 #include "protocol.hpp"
-#include "view.hpp"
 
 class DraughtsNode {
 public:
@@ -43,36 +41,12 @@ public:
     std::optional<std::string> pick_nnh_for(const std::string& nh_peer_id,
                                            const std::string& exclude_peer_id) const;
 
-    static std::string ep_to_string(const boost::asio::ip::udp::endpoint& ep);
-
 private:
-    using udp = boost::asio::ip::udp;
-
-    struct Pending {
-        proto::Message msg;
-        udp::endpoint to;
-        uint64_t created_ms = 0;
-        uint64_t next_retry_ms = 0;
-        int retries = 0;
-        int max_retries = 3;
-    };
-
     struct TwoHopEntry {
         std::vector<proto::PeerDescriptor> neighbors;
-        uint64_t updated_ms = 0;
     };
 
-    // Networking
-    void do_receive();
-    void on_datagram(const tlv::Bytes& bytes, const udp::endpoint& from);
-    void send_msg(const proto::Message& m, const udp::endpoint& to);
-
     // Timers
-    void tick_keepalive();
-    void tick_shuffle();
-    void tick_repair();
-    void tick_pending();
-    void tick_neighbor_set();
     void tick_housekeeping();
     void update_active_neighbors_file(bool force);
     void remove_active_neighbors_file();
@@ -80,24 +54,8 @@ private:
     void remove_self_info_file();
     bool load_static_topology();
 
-    // Overlay handlers
-    void handle_join(uint64_t nonce, const tlv::Bytes& payload, const udp::endpoint& from);
-    void handle_forward_join(uint64_t nonce, const tlv::Bytes& payload, const udp::endpoint& from);
-    void handle_add_req(uint64_t nonce, const tlv::Bytes& payload, const udp::endpoint& from);
-    void handle_add_ack(uint64_t nonce, const tlv::Bytes& payload, const udp::endpoint& from);
-    void handle_keepalive(uint64_t nonce, const tlv::Bytes& payload, const udp::endpoint& from);
-    void handle_shuffle_req(uint64_t nonce, const tlv::Bytes& payload, const udp::endpoint& from);
-    void handle_shuffle_resp(uint64_t nonce, const tlv::Bytes& payload, const udp::endpoint& from);
-    void handle_neighbor_set(uint64_t nonce, const tlv::Bytes& payload, const udp::endpoint& from);
-
-    // Overlay logic
-    void ensure_active_in_range();
-    void try_add_active(const proto::PeerDescriptor& d);
-    std::vector<proto::PeerDescriptor> referrals(size_t n) const;
-
     // Peer knowledge / lookup
     void learn_peer(const proto::PeerDescriptor& d);
-    std::optional<std::string> peer_id_from_endpoint(const udp::endpoint& ep) const;
 
 private:
     boost::asio::io_context& io_;
@@ -107,31 +65,17 @@ private:
     Logger& logger_;
     Console& console_;
 
-    // UDP
-    udp::socket sock_;
-    udp::endpoint remote_;
-    std::array<uint8_t, 4096> rxbuf_{};
-
-    // Views
-    Views views_;
+    // Active neighbors (static topology)
+    std::vector<proto::PeerDescriptor> active_neighbors_;
 
     // Directories
     std::unordered_map<std::string, proto::PeerDescriptor> directory_;
-    std::unordered_map<std::string, std::string> addr_to_peer_id_;
     std::unordered_map<std::string, std::string> draughts_addr_to_peer_id_;
 
     // Two-hop cache (neighbor -> its active neighbors)
     std::unordered_map<std::string, TwoHopEntry> twohop_;
 
-    // Pending overlay requests
-    std::unordered_map<uint64_t, Pending> pending_;
-
     // Timers
-    boost::asio::steady_timer t_keepalive_;
-    boost::asio::steady_timer t_shuffle_;
-    boost::asio::steady_timer t_repair_;
-    boost::asio::steady_timer t_pending_;
-    boost::asio::steady_timer t_neighbor_set_;
     boost::asio::steady_timer t_housekeeping_;
 
     // RNG
