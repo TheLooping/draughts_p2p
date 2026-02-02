@@ -115,6 +115,23 @@ reply <session_hex> ok-from-node20
 - `peers/` 中存在每个节点的 `*.info`；`keys/` 中存在每个节点的 `*.pem` 与 `*.pub`。
 - `topology/adjacency_matrix.csv` 与 `topology/adjacency.json` 已生成（静态拓扑，不需要拓扑收集器）。
 
+### 调试：initiator 字段打点与重放
+
+构建并运行后，会在 `trace/` 下生成每个进程独立目录（包含 `trace.log` 与 `keys/`）：
+```bash
+./build/draughts_node config/generated/node10.conf
+```
+
+使用重放脚本核对每一步加/解密是否一致：
+```bash
+./scripts/replay_initiator_trace.py --trace-dir trace/node10_<pid>_<ts>
+```
+
+如需清理调试产物：
+```bash
+rm -rf trace
+```
+
 示例：本地 3 节点配置
 
 终端 A（`config/a.conf`）：
