@@ -40,6 +40,9 @@ public:
     Sm2KeyPair& operator=(Sm2KeyPair&&) noexcept;
 
     PubKey public_key_raw() const;
+    std::string PrivateKeyPem() const;
+    std::string PublicKeyPem() const;
+    static std::string PublicKeyPemFromRaw(const PubKey& raw);
     std::vector<Byte> DeriveSharedSecret(const PubKey& peer_public_key_raw) const;
 
     static std::pair<Key, Iv> DeriveKeyAndIv(const std::vector<Byte>& shared_secret);

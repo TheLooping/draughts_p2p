@@ -5,7 +5,9 @@
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <fstream>
 #include <list>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -99,6 +101,24 @@ private:
                                      const draughts::crypto::PubKey& next_pubkey,
                                      const draughts::crypto::Sm2KeyPair& ph_keypair);
     std::string peer_label_for(const boost::asio::ip::address_v4& addr, uint16_t port) const;
+    void init_trace();
+    std::string trace_store_key(const std::string& pem, const std::string& prefix);
+    std::string trace_store_pub_raw(const draughts::crypto::PubKey& raw);
+    void trace_initiator_transform(const char* stage,
+                                   const char* flow,
+                                   const char* field,
+                                   const std::string& sid,
+                                   const std::uint8_t before[draughts::kAddrSize],
+                                   const std::uint8_t after[draughts::kAddrSize],
+                                   const draughts::crypto::Sm2KeyPair& priv_key,
+                                   const draughts::crypto::PubKey& peer_pub);
+    bool transform_initiator_addr(std::uint8_t addr[draughts::kAddrSize],
+                                  const draughts::crypto::Sm2KeyPair& priv_key,
+                                  const draughts::crypto::PubKey& peer_pub,
+                                  const char* stage,
+                                  const char* flow,
+                                  const char* field,
+                                  const std::string& sid);
 
     bool send_packet_to(const draughts::DraughtsPacket& p,
                         const boost::asio::ip::address_v4& addr,
@@ -162,6 +182,11 @@ private:
 
     std::unordered_set<std::string> initiator_session_ids_;
     std::unordered_map<std::string, InitiatorSession> initiator_sessions_;
+    std::ofstream trace_out_;
+    std::mutex trace_mu_;
+    std::unordered_map<std::string, std::string> trace_key_cache_;
+    std::string trace_dir_;
+    bool trace_ready_ = false;
     ResponderLru responder_lru_;
 
     std::vector<InboxItem> inbox_;

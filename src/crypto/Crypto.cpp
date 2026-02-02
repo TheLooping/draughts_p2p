@@ -184,6 +184,55 @@ PubKey Sm2KeyPair::public_key_raw() const {
     return ec_pubkey_raw(key_pair_.get());
 }
 
+std::string Sm2KeyPair::PrivateKeyPem() const {
+    if (!key_pair_) throw std::runtime_error("keypair not initialized");
+    BIO* mem = BIO_new(BIO_s_mem());
+    if (!mem) ThrowOpenSslError("BIO_new");
+    std::unique_ptr<BIO, decltype(&BIO_free)> guard(mem, BIO_free);
+    if (PEM_write_bio_PrivateKey(mem, key_pair_.get(), nullptr, nullptr, 0, nullptr, nullptr) != 1) {
+        ThrowOpenSslError("PEM_write_bio_PrivateKey");
+    }
+    BUF_MEM* buf = nullptr;
+    BIO_get_mem_ptr(mem, &buf);
+    if (!buf || !buf->data || buf->length == 0) {
+        throw std::runtime_error("empty private key PEM");
+    }
+    return std::string(buf->data, buf->length);
+}
+
+std::string Sm2KeyPair::PublicKeyPem() const {
+    if (!key_pair_) throw std::runtime_error("keypair not initialized");
+    BIO* mem = BIO_new(BIO_s_mem());
+    if (!mem) ThrowOpenSslError("BIO_new");
+    std::unique_ptr<BIO, decltype(&BIO_free)> guard(mem, BIO_free);
+    if (PEM_write_bio_PUBKEY(mem, key_pair_.get()) != 1) {
+        ThrowOpenSslError("PEM_write_bio_PUBKEY");
+    }
+    BUF_MEM* buf = nullptr;
+    BIO_get_mem_ptr(mem, &buf);
+    if (!buf || !buf->data || buf->length == 0) {
+        throw std::runtime_error("empty public key PEM");
+    }
+    return std::string(buf->data, buf->length);
+}
+
+std::string Sm2KeyPair::PublicKeyPemFromRaw(const PubKey& raw) {
+    EVP_PKEY* pkey = sm2_from_raw_pubkey(raw);
+    std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> guard(pkey, EVP_PKEY_free);
+    BIO* mem = BIO_new(BIO_s_mem());
+    if (!mem) ThrowOpenSslError("BIO_new");
+    std::unique_ptr<BIO, decltype(&BIO_free)> bio_guard(mem, BIO_free);
+    if (PEM_write_bio_PUBKEY(mem, pkey) != 1) {
+        ThrowOpenSslError("PEM_write_bio_PUBKEY");
+    }
+    BUF_MEM* buf = nullptr;
+    BIO_get_mem_ptr(mem, &buf);
+    if (!buf || !buf->data || buf->length == 0) {
+        throw std::runtime_error("empty public key PEM");
+    }
+    return std::string(buf->data, buf->length);
+}
+
 std::vector<Byte> Sm2KeyPair::DeriveSharedSecret(const PubKey& peer_public_key_raw) const {
     if (!key_pair_) throw std::runtime_error("SM2 keypair not initialized");
 
