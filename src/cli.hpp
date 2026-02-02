@@ -8,11 +8,11 @@
 
 #include "console.hpp"
 #include "draughts_app.hpp"
-#include "node.hpp"
+#include "overlay.hpp"
 
 class Cli {
 public:
-    Cli(boost::asio::io_context& io, DraughtsNode& node, DraughtsApp& app, Console& console);
+    Cli(boost::asio::io_context& io, HyparviewOverlay& overlay, DraughtsApp& app, Console& console);
 
     void start();
     void join();
@@ -21,11 +21,10 @@ private:
     void run();
 
     boost::asio::io_context& io_;
-    DraughtsNode& node_;
+    HyparviewOverlay& overlay_;
     DraughtsApp& app_;
     Console& console_;
 
     std::atomic<bool> stop_{false};
     std::thread th_;
 };
-

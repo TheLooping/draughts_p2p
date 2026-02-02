@@ -1,14 +1,49 @@
-# draughts_p2p（EC-P256 / HyParView / Draughts）
+# draughts_p2p（HyParView Overlay / Draughts / C++17）
 
-本项目是 **Draughts 匿名路由协议** 在去中心化 P2P 覆盖网络上的 C++17 原型实现，包含：
+本项目是 **Draughts 匿名路由协议** 在 **动态 HyParView Overlay** 上的 C++17 原型实现，特点：
 
-- **静态拓扑**：基于 **UDP/IPv4** 的预生成邻接关系（不再考虑动态加入）。
-- **两跳邻居同步**：用于局部 NNH 选择。
-- **Draughts 随机游走路由**：带 **CIPLC** 路径长度控制。
-- **匿名请求/响应**：使用 **EC-P256 ECDH + HKDF + AES-CTR XOR**。
-- CLI 交互；内部日志写入文件。
+- **动态 HyParView Overlay**：active/passive view、JOIN/forward JOIN、PING/PONG、VIEW_UPDATE、目录与 TTL。
+- **两跳缓存**：基于 VIEW_UPDATE 的两跳节点信息缓存（含完整 descriptor + TTL）。
+- **Draughts 随机游走路由**：带 CIPLC 路径长度控制。
+- **UDP 双端口**：overlay 控制面与业务面分离。
+- CLI 交互；日志写入文件。
 
 这是实验性原型，不适合直接用于对抗性互联网环境。
+
+---
+
+## 四层架构
+
+**Layer 1：IO 层（UDP + 定时器）**
+- 仅负责 UDP 收发与定时器触发。
+- 不解析 JOIN / VIEW_UPDATE，不管理邻居。
+
+**Layer 2：HyParView Overlay 层**
+- 维护 active / passive view。
+- 实现 JOIN / 转发 JOIN（带 TTL）、PING/PONG、VIEW_UPDATE。
+- 维护 two-hop cache、peer directory（含 TTL）。
+
+**Layer 3：Draughts 匿名通信层**
+- 处理业务数据包、路由选择（NNH）、加解密。
+- 通过 Overlay 提供的接口读取 active/twohop/directory。
+
+**Layer 4：CLI 层**
+- 读取用户输入，post 到 io 线程执行。
+- 展示 neighbors / twohop / stats，打印收到的消息。
+
+---
+
+## 端口职责
+
+- `overlay_port`：HyParView Overlay 控制面。
+- `draughts_port`：Draughts 业务面。
+
+---
+
+## 线程模型
+
+- **单 io_context 线程**：所有 socket 回调、timer 回调、overlay/draughts 状态修改。
+- **CLI 线程**：只读 stdin，并 post 到 io 线程。
 
 ---
 
@@ -37,116 +72,203 @@ cmake --build . -j
 
 ---
 
-## 运行（本地示例）
+## 配置项（必须支持）
 
-编辑 `config/default.conf`，并使用配置文件路径启动：
-```bash
-./build/draughts_node ./config/default.conf
+- `is_bootstrap`：是否为引导节点（true/false）。
+- `bootstrap_endpoints`：引导节点列表（`ipv4:overlay_port:draughts_port`，逗号分隔）。
+- `overlay_port` / `draughts_port`：两个 UDP 端口。
+- `active_min` / `active_max` / `passive_max`
+- `join_ttl`
+- `ping_interval_ms`
+- `peer_timeout_ms`
+- `view_update_interval_ms`
+- `valid_window_s`
+
+可选：
+- `active_neighbors_file`、`self_info_file`、`peer_info_dir`、`identity_key_file`
+- Draughts / CIPLC 参数（见 `config/default.conf`）
+
+---
+
+## 配置示例
+
+**引导节点（bootstrap）**：
+```ini
+peer_id = nodeA
+bind_ip = 127.0.0.1
+overlay_port = 4000
+draughts_port = 5000
+is_bootstrap = true
+
+active_min = 3
+active_max = 5
+passive_max = 80
+join_ttl = 4
+ping_interval_ms = 10000
+peer_timeout_ms = 30000
+view_update_interval_ms = 5000
+valid_window_s = 60
 ```
 
-多节点实验常用配置：
-- `cli_enabled`（true/false）：是否开启 CLI。
-- `active_neighbors_file`：当前 active 邻居列表 JSON（覆盖写、退出时删除）。
-- `self_info_file`：节点自信息文件（地址/端口/公钥），供外部查询。
-- `peer_info_dir`：自信息文件目录，CLI 可用于解析 `peer_id`。
-- `identity_key_file`：EC P-256 私钥文件（PEM）。
-- `static_topology`：是否启用静态拓扑（推荐 true）。
-- `topology_dir`：拓扑文件目录（每节点 `.neighbors`）。
+**普通节点**：
+```ini
+peer_id = nodeB
+bind_ip = 127.0.0.1
+overlay_port = 4001
+draughts_port = 5001
+is_bootstrap = false
+bootstrap_endpoints = 127.0.0.1:4000:5000
 
-### 实验：单机 36 节点（CLI 为 node10/node20）
-
-清理旧文件：
-```bash
-./scripts/clean_experiment.sh
+active_min = 3
+active_max = 5
+passive_max = 80
+join_ttl = 4
+ping_interval_ms = 10000
+peer_timeout_ms = 30000
+view_update_interval_ms = 5000
+valid_window_s = 60
 ```
 
-编译：
+---
+
+## 实验：单机 56 节点（node10/node20 为 CLI）
+
+目标：本机同 IP 启动 56 个进程；节点 10/20 为交互式 CLI，其余为无 CLI；验证请求/回复成功。
+
+### 1) 生成 56 个配置文件
+
+在项目根目录执行：
 ```bash
-mkdir -p build
-cd build
-cmake ..
-cmake --build . -j
-cd ..
+mkdir -p config/exp56 logs
+```
+```bash
+for i in $(seq 1 56); do
+  overlay=$((4000 + i - 1))
+  draughts=$((5000 + i - 1))
+  cli="false"
+  if [ "$i" = "10" ] || [ "$i" = "20" ]; then cli="true"; fi
+  is_bootstrap="false"
+  bootstrap_line="bootstrap_endpoints = 127.0.0.1:4000:5000"
+  if [ "$i" = "1" ]; then
+    is_bootstrap="true"
+    bootstrap_line="# bootstrap_endpoints = 127.0.0.1:4000:5000"
+  fi
+
+  cat > config/exp56/node${i}.conf <<EOF
+peer_id = node${i}
+bind_ip = 127.0.0.1
+overlay_port = ${overlay}
+draughts_port = ${draughts}
+is_bootstrap = ${is_bootstrap}
+${bootstrap_line}
+
+log_file = logs/node${i}.log
+log_level = info
+cli_enabled = ${cli}
+
+active_min = 3
+active_max = 5
+passive_max = 80
+join_ttl = 4
+ping_interval_ms = 10000
+peer_timeout_ms = 30000
+view_update_interval_ms = 5000
+valid_window_s = 60
+EOF
+done
 ```
 
-生成配置 + 密钥 + 静态拓扑：
+### 2) 启动 54 个后台节点（非 CLI）
+
 ```bash
-./scripts/gen_configs.py --count 36 --cli-nodes 10,20 --active-min 3 --active-max 5 --neighbor-set-k 5 --bind-ip 127.0.0.1
+mkdir -p run
+for i in $(seq 1 56); do
+  if [ "$i" = "10" ] || [ "$i" = "20" ]; then continue; fi
+  ./build/draughts_node config/exp56/node${i}.conf > run/node${i}.out 2>&1 &
+done
 ```
 
-启动中继节点（每 1 秒一个，跳过 CLI 节点）：
+### 3) 启动 CLI 节点（各开一个终端）
+
+终端 A：
 ```bash
-./scripts/run_nodes.sh --skip node10,node20 --interval 1
+./build/draughts_node config/exp56/node10.conf
 ```
 
-启动 CLI 节点（终端 A）：
+终端 B：
 ```bash
-./build/draughts_node config/generated/node10.conf
+./build/draughts_node config/exp56/node20.conf
 ```
 
-启动 CLI 节点（终端 B）：
-```bash
-./build/draughts_node config/generated/node20.conf
-```
+### 4) CLI 内测试请求/回复
 
-测试（终端 A / B 的 CLI 中执行）：
+终端 A（node10）：
 ```bash
-id
 neighbors
+twohop
 send node20 hello-from-node10
 ```
 
-终端 B 查看收件箱：
+终端 B（node20）：
 ```bash
 inbox
 requests
 reply <session_hex> ok-from-node20
 ```
 
-停止所有后台中继节点：
+终端 A（node10）：
 ```bash
-./scripts/stop_nodes.sh
+inbox
 ```
 
-测试预期：
-- 各节点日志出现 `static topology loaded`，active 邻居数在 `active_min~active_max` 范围内。
-- CLI 的 `neighbors` 能看到 3~5 个邻居（与配置一致）。
-- `send` 后对端 `inbox` 出现请求；`reply` 后发起端出现响应。
-- `peers/` 中存在每个节点的 `*.info`；`keys/` 中存在每个节点的 `*.pem` 与 `*.pub`。
-- `topology/adjacency_matrix.csv` 与 `topology/adjacency.json` 已生成（静态拓扑，不需要拓扑收集器）。
+### 5) 停止全部后台节点（可选）
 
-示例：本地 3 节点配置
-
-终端 A（`config/a.conf`）：
-```ini
-peer_id = A
-bind_ip = 127.0.0.1
-overlay_port = 4000
-draughts_port = 5000
+```bash
+pkill -f draughts_node
 ```
 
-终端 B（`config/b.conf`）：
-```ini
-peer_id = B
-bind_ip = 127.0.0.1
-overlay_port = 4001
-draughts_port = 5001
-bootstraps = 127.0.0.1:4000:5000
+---
+
+## 多节点测试（本地 3 节点）
+
+终端 A：
+```bash
+./build/draughts_node config/a.conf
 ```
 
-终端 C（`config/c.conf`）：
-```ini
-peer_id = C
-bind_ip = 127.0.0.1
-overlay_port = 4002
-draughts_port = 5002
-bootstraps = 127.0.0.1:4000:5000
+终端 B：
+```bash
+./build/draughts_node config/b.conf
 ```
 
-说明：
-- `overlay_port` 用于 HyParView 维护通信。
-- `draughts_port` 用于 Draughts 数据通信。
-- `bootstraps` 使用 `ipv4:overlay_port:draughts_port`。
+终端 C：
+```bash
+./build/draughts_node config/c.conf
+```
+
+CLI 示例：
+```bash
+id
+neighbors
+twohop
+send nodeB hello
+```
+
+终端 B：
+```bash
+inbox
+requests
+reply <session_hex> ok
+```
+
+---
+
+## 验收标准
+
+- **Active 数量**维持在 `[active_min, active_max]` 区间。
+- **VIEW_UPDATE** 能持续刷新 two-hop 缓存与目录 TTL。
+- **PING/PONG** 能剔除超时 peer。
+- **Draughts 通信** `send` / `reply` 可用。
 
 ---
 
@@ -156,6 +278,8 @@ bootstraps = 127.0.0.1:4000:5000
 help                             显示帮助
 id                               显示本地 peer id / endpoint
 neighbors                        显示 active 邻居
+twohop                           显示 two-hop 缓存
+peers                            显示目录中的 peer
 send <peer_id|ipv4:port> <text>  发送请求
 send_session <session_hex> <text> 使用已有会话继续发送
 inbox                            查看收件箱
@@ -176,14 +300,6 @@ C_ADDR_Real_Receiver (6) | C_ADDR_Real_Sender (6) | x (8) | magic (8) | session_
 - `ADDR_NNH` / `C_ADDR_Real_Receiver` / `C_ADDR_Real_Sender` 为 **IPv4(4 字节) + 端口(2 字节)**。
 - `PK_PH_tmp` 为逐跳公钥，仅在三段“退出”阶段为 **0xEE..EE**。
 - `C_Data` 使用 `PK_Init_tmp` 与 responder/initiator 密钥端到端加密。
-
----
-
-## 偏差与简化说明
-
-- **Out node / responder 逻辑** 以 `doc/Initiator.png`、`doc/node.png` 为准。
-- 原型中 `C_ADDR_*` 在逐跳解密后对当前节点可见；真实系统可增加链路加密。
-- CIPLC 使用论文中的混沌函数并逐跳更新 `x` 以控制转发概率。
 
 ---
 

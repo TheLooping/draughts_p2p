@@ -11,6 +11,7 @@
 #include <fstream>
 #include <functional>
 #include <iomanip>
+#include <memory>
 #include <sstream>
 
 
@@ -131,17 +132,16 @@ void DraughtsApp::ResponderLru::evict_if_needed() {
 
 DraughtsApp::DraughtsApp(boost::asio::io_context& io,
                          Config cfg,
-                         DraughtsNode& node,
+                         HyparviewOverlay& overlay,
+                         IoLayer& io_layer,
                          draughts::crypto::Sm2KeyPair identity,
-                         Logger& logger,
-                         Console& console)
+                         Logger& logger)
     : io_(io),
       cfg_(std::move(cfg)),
-      node_(node),
+      overlay_(overlay),
+      io_layer_(io_layer),
       identity_(std::move(identity)),
       logger_(logger),
-      console_(console),
-      sock_(io_),
       responder_lru_(kResponderLruCapacity),
       t_housekeeping_(io_) {
     ciplc_.a = cfg_.ciplc_a;
@@ -152,22 +152,6 @@ DraughtsApp::DraughtsApp(boost::asio::io_context& io,
 }
 
 bool DraughtsApp::start() {
-    udp::endpoint bind_ep(address_v4::from_string(cfg_.bind_ip), cfg_.draughts_port);
-    boost::system::error_code ec;
-    sock_.open(udp::v4(), ec);
-    if (ec) {
-        logger_.error("failed to open draughts socket: " + ec.message());
-        return false;
-    }
-    sock_.bind(bind_ep, ec);
-    if (ec) {
-        logger_.error("failed to bind draughts socket: " + ec.message() +
-                      " (addr=" + cfg_.bind_ip + ":" + std::to_string(cfg_.draughts_port) + ")");
-        return false;
-    }
-
-    do_receive();
-
     auto tick = std::make_shared<std::function<void()>>();
     *tick = [this, tick]() {
         t_housekeeping_.expires_after(std::chrono::milliseconds(1000));
@@ -182,15 +166,18 @@ bool DraughtsApp::start() {
 }
 
 void DraughtsApp::stop() {
-    boost::system::error_code ec;
-    sock_.close(ec);
     t_housekeeping_.cancel();
 }
 
-void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
+void DraughtsApp::set_notify(std::function<void(const std::string&)> cb) {
+    notify_ = std::move(cb);
+}
+
+std::vector<std::string> DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
+    std::vector<std::string> out;
     if (dest.empty() || text.empty()) {
-        console_.println("usage: send <peer_id|ipv4:port> <text>");
-        return;
+        out.push_back("usage: send <peer_id|ipv4:port> <text>");
+        return out;
     }
     logger_.info("cli send dest=" + dest + " text_len=" + std::to_string(text.size()));
 
@@ -199,12 +186,11 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
     draughts::crypto::PubKey resp_pub{};
     std::string resp_peer_id;
     if (!resolve_peer_target(dest, resp_addr, resp_port, resp_pub, resp_peer_id)) {
-        console_.println("responder not found (need peer_id or ipv4:port with published info)");
+        out.push_back("responder not found (need peer_id or ipv4:port with published info)");
         logger_.warn("cli send failed: responder not found dest=" + dest);
-        return;
+        return out;
     }
 
-    // End-to-end init key (per-session) for initiator address + payload.
     draughts::crypto::Sm2KeyPair init_tmp;
     std::array<uint8_t, draughts::kSessionIdSize> sid_bytes{};
     std::string sid;
@@ -224,49 +210,54 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
     initiator_session_ids_.insert(sid);
     auto [it, inserted] = initiator_sessions_.emplace(sid, std::move(session));
     if (!inserted) {
-        console_.println("failed to create session (collision)");
+        out.push_back("failed to create session (collision)");
         logger_.warn("cli send failed: session collision");
         initiator_session_ids_.erase(sid);
-        return;
+        return out;
     }
 
-    if (!send_request_with_session(sid, it->second, text)) {
+    if (!send_request_with_session(sid, it->second, text, &out)) {
         initiator_session_ids_.erase(sid);
         initiator_sessions_.erase(sid);
-        return;
+        return out;
     }
+    return out;
 }
 
-void DraughtsApp::cmd_send_session(const std::string& session_hex_in, const std::string& text) {
+std::vector<std::string> DraughtsApp::cmd_send_session(const std::string& session_hex_in,
+                                                       const std::string& text) {
+    std::vector<std::string> out;
     if (session_hex_in.empty() || text.empty()) {
-        console_.println("usage: send_session <session_hex> <text>");
-        return;
+        out.push_back("usage: send_session <session_hex> <text>");
+        return out;
     }
     logger_.info("cli send_session session=" + session_hex_in + " text_len=" + std::to_string(text.size()));
 
     std::string sid;
     if (!parse_session_hex(session_hex_in, sid)) {
-        console_.println("invalid session hex");
+        out.push_back("invalid session hex");
         logger_.warn("cli send_session failed: invalid session_hex");
-        return;
+        return out;
     }
 
     auto it = initiator_sessions_.find(sid);
     if (it == initiator_sessions_.end()) {
-        console_.println("unknown session id");
+        out.push_back("unknown session id");
         logger_.warn("cli send_session failed: unknown session id " + session_hex_in);
-        return;
+        return out;
     }
     initiator_session_ids_.insert(sid);
 
-    if (!send_request_with_session(sid, it->second, text)) {
+    if (!send_request_with_session(sid, it->second, text, &out)) {
         logger_.warn("cli send_session failed session=" + session_hex(sid));
-        return;
+        return out;
     }
+    return out;
 }
 
-void DraughtsApp::cmd_inbox() {
-    console_.println("Inbox messages: " + std::to_string(inbox_.size()));
+std::vector<std::string> DraughtsApp::cmd_inbox() const {
+    std::vector<std::string> out;
+    out.push_back("Inbox messages: " + std::to_string(inbox_.size()));
     for (const auto& item : inbox_) {
         std::ostringstream oss;
         if (item.is_reply) {
@@ -275,46 +266,51 @@ void DraughtsApp::cmd_inbox() {
             oss << "  [REQUEST] session=" << item.session_hex << " from=" << item.from_addr
                 << " text=\"" << item.text << "\"";
         }
-        console_.println(oss.str());
+        out.push_back(oss.str());
     }
     logger_.info("cli inbox count=" + std::to_string(inbox_.size()));
+    return out;
 }
 
-void DraughtsApp::cmd_requests() {
+std::vector<std::string> DraughtsApp::cmd_requests() const {
+    std::vector<std::string> out;
     auto counts = responder_lru_.session_counts();
-    console_.println("Pending responder sessions: " + std::to_string(counts.size())
-                     + " (entries=" + std::to_string(responder_lru_.size()) + ")");
+    out.push_back("Pending responder sessions: " + std::to_string(counts.size())
+                  + " (entries=" + std::to_string(responder_lru_.size()) + ")");
     for (const auto& kv : counts) {
-        console_.println("  session=" + session_hex(kv.first) + " pending=" + std::to_string(kv.second));
+        out.push_back("  session=" + session_hex(kv.first) + " pending=" + std::to_string(kv.second));
     }
     logger_.info("cli requests sessions=" + std::to_string(counts.size()) +
                  " entries=" + std::to_string(responder_lru_.size()));
+    return out;
 }
 
-void DraughtsApp::cmd_reply(const std::string& session_hex_in, const std::string& text) {
+std::vector<std::string> DraughtsApp::cmd_reply(const std::string& session_hex_in,
+                                                const std::string& text) {
+    std::vector<std::string> out;
     if (session_hex_in.empty() || text.empty()) {
-        console_.println("usage: reply <session_hex> <text>");
-        return;
+        out.push_back("usage: reply <session_hex> <text>");
+        return out;
     }
     logger_.info("cli reply session=" + session_hex_in + " text_len=" + std::to_string(text.size()));
 
     std::string sid;
     if (!parse_session_hex(session_hex_in, sid)) {
-        console_.println("invalid session hex");
+        out.push_back("invalid session hex");
         logger_.warn("cli reply failed: invalid session_hex");
-        return;
+        return out;
     }
 
     ResponderValue value;
     if (!responder_lru_.get_first_and_move_to_tail(sid, value)) {
-        console_.println("unknown session id");
+        out.push_back("unknown session id");
         logger_.warn("cli reply failed: unknown session id " + session_hex_in);
-        return;
+        return out;
     }
     if (value.addr_nnh.is_unspecified() || value.port_nnh == 0) {
-        console_.println("session missing nnh address; cannot reply");
+        out.push_back("session missing nnh address; cannot reply");
         logger_.warn("cli reply failed: missing nnh address");
-        return;
+        return out;
     }
 
     draughts::DraughtsPacket p{};
@@ -342,39 +338,24 @@ void DraughtsApp::cmd_reply(const std::string& session_hex_in, const std::string
     crypto::CommutativeCipher::TransformInPlace(p.c_data, draughts::kDataSize, key_iv.first, key_iv.second);
 
     if (!send_packet_to(p, value.addr_ph, value.port_ph)) {
-        console_.println("failed to send reply to out node");
+        out.push_back("failed to send reply to out node");
         logger_.warn("cli reply failed session=" + session_hex(sid));
-        return;
+        return out;
     }
 
     logger_.info("cli send reply session=" + session_hex(sid) +
                  " outnode=" + endpoint_to_string(value.addr_ph, value.port_ph));
-    console_.println("sent reply session=" + session_hex(sid) + " to out node");
+    out.push_back("sent reply session=" + session_hex(sid) + " to out node");
+    return out;
 }
 
 // ------------------- UDP receive -------------------
 
-void DraughtsApp::do_receive() {
-    sock_.async_receive_from(boost::asio::buffer(rxbuf_), remote_,
-                             [this](boost::system::error_code ec, std::size_t n) {
-        if (ec) {
-            if (ec != boost::asio::error::operation_aborted) {
-                logger_.warn(std::string("draughts recv error: ") + ec.message());
-            }
-            return;
-        }
-        if (n != draughts::kPacketSize) {
-            logger_.warn("dropping draughts packet with invalid size");
-            do_receive();
-            return;
-        }
-        on_datagram(rxbuf_, remote_);
-        do_receive();
-    });
-}
-
-void DraughtsApp::on_datagram(const std::array<uint8_t, draughts::kPacketSize>& bytes,
-                              const udp::endpoint& from) {
+void DraughtsApp::on_datagram(const tlv::Bytes& bytes, const boost::asio::ip::udp::endpoint& from) {
+    if (bytes.size() != draughts::kPacketSize) {
+        logger_.warn("dropping draughts packet with invalid size");
+        return;
+    }
     draughts::DraughtsPacket p{};
     std::memcpy(&p, bytes.data(), draughts::kPacketSize);
     logger_.info("recv packet from " + peer_label_for(from.address().to_v4(), from.port()));
@@ -411,7 +392,9 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
 
             logger_.info("recv reply session=" + session_hex(sid));
             inbox_.push_back(InboxItem{true, session_hex(sid), text, ""});
-            console_.println("[REPLY] session=" + session_hex(sid) + " text=\"" + text + "\"");
+            if (notify_) {
+                notify_("[REPLY] session=" + session_hex(sid) + " text=\"" + text + "\"");
+            }
             it->second.last_used_ms = now_ms();
             return;
         }
@@ -455,8 +438,11 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
         responder_lru_.insert_head(sid, value);
 
         inbox_.push_back(InboxItem{false, session_hex(sid), text, endpoint_to_string(from.address().to_v4(), from.port())});
-        console_.println("[REQUEST] session=" + session_hex(sid) + " from=" + endpoint_to_string(from.address().to_v4(), from.port())
-                         + " text=\"" + text + "\"");
+        if (notify_) {
+            notify_("[REQUEST] session=" + session_hex(sid) + " from=" +
+                    endpoint_to_string(from.address().to_v4(), from.port()) +
+                    " text=\"" + text + "\"");
+        }
         return;
     }
 
@@ -474,11 +460,11 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
         }
 
         std::string exclude_peer_id;
-        auto from_desc = node_.lookup_peer_by_draughts_endpoint(from.address().to_v4(), from.port());
+        auto from_desc = overlay_.lookup_peer_by_draughts_endpoint(from.address().to_v4(), from.port());
         if (from_desc) exclude_peer_id = from_desc->peer_id;
 
         std::string nh_peer_id;
-        auto nh_desc = node_.lookup_peer_by_draughts_endpoint(nh_addr, nh_port);
+        auto nh_desc = overlay_.lookup_peer_by_draughts_endpoint(nh_addr, nh_port);
         if (nh_desc) nh_peer_id = nh_desc->peer_id;
 
         address_v4 nnh_addr;
@@ -526,7 +512,7 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     std::string sid = session_id_from_bytes(p.session_id);
     bool response_flow = draughts::is_zero_addr(p.params.c_addr_real_sender);
     bool response_first_hop = response_flow && (p.params.x < 0.0);
-    auto from_desc = node_.lookup_peer_by_draughts_endpoint(from.address().to_v4(), from.port());
+    auto from_desc = overlay_.lookup_peer_by_draughts_endpoint(from.address().to_v4(), from.port());
     std::string from_peer_id = from_desc ? from_desc->peer_id : "";
 
     if (approx_eq(p.params.x, 0.0)) {
@@ -605,7 +591,7 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
         }
 
         std::string nh_peer_id;
-        auto nh_desc = node_.lookup_peer_by_draughts_endpoint(nh_addr, nh_port);
+        auto nh_desc = overlay_.lookup_peer_by_draughts_endpoint(nh_addr, nh_port);
         if (nh_desc) nh_peer_id = nh_desc->peer_id;
 
         address_v4 nnh_addr;
@@ -615,7 +601,7 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
             logger_.warn("failed to pick nnh for relay");
             return;
         }
-        auto nnh_desc = node_.lookup_peer_by_draughts_endpoint(nnh_addr, nnh_port);
+        auto nnh_desc = overlay_.lookup_peer_by_draughts_endpoint(nnh_addr, nnh_port);
         std::string nnh_peer_id = nnh_desc ? nnh_desc->peer_id : "";
 
         if (is_zero_pk_bytes(p.params.pk_pph_tmp) || draughts::is_exit_pk(p.params.pk_pph_tmp)) {
@@ -662,13 +648,13 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
         if (nh_port != 0 && get_peer_pubkey_by_endpoint(nh_addr, nh_port, outnode_pub)) {
             outnode_addr = nh_addr;
             outnode_port = nh_port;
-            auto nh_desc = node_.lookup_peer_by_draughts_endpoint(nh_addr, nh_port);
+            auto nh_desc = overlay_.lookup_peer_by_draughts_endpoint(nh_addr, nh_port);
             if (nh_desc) outnode_peer_id = nh_desc->peer_id;
             outnode_ok = true;
         }
     }
     if (!outnode_ok) {
-        auto nh_desc = node_.pick_random_active_except(exclude_peer_id);
+        auto nh_desc = overlay_.pick_random_active_except(exclude_peer_id);
         if (!nh_desc) {
             logger_.warn("no neighbors to pick outnode");
             return;
@@ -768,15 +754,15 @@ bool DraughtsApp::send_packet_to(const draughts::DraughtsPacket& p,
                                  uint16_t port) {
     if (port == 0) return false;
     udp::endpoint ep(addr, port);
-    auto buf = std::make_shared<std::array<uint8_t, draughts::kPacketSize>>();
-    std::memcpy(buf->data(), &p, draughts::kPacketSize);
     logger_.info("send packet to " + peer_label_for(addr, port));
-    sock_.async_send_to(boost::asio::buffer(*buf), ep, [buf](auto, auto) {});
+    tlv::Bytes bytes(draughts::kPacketSize);
+    std::memcpy(bytes.data(), &p, draughts::kPacketSize);
+    io_layer_.send_draughts(bytes, ep);
     return true;
 }
 
 std::string DraughtsApp::peer_label_for(const address_v4& addr, uint16_t port) const {
-    auto desc = node_.lookup_peer_by_draughts_endpoint(addr, port);
+    auto desc = overlay_.lookup_peer_by_draughts_endpoint(addr, port);
     auto ep = endpoint_to_string(addr, port);
     if (desc && !desc->peer_id.empty()) {
         return desc->peer_id + "@" + ep;
@@ -797,7 +783,7 @@ bool DraughtsApp::pick_nh_nnh(address_v4& nh_addr,
                               uint16_t& nnh_port,
                               draughts::crypto::PubKey& nnh_pub,
                               const std::string& exclude_peer_id) {
-    auto nh_desc = node_.pick_random_active_except(exclude_peer_id);
+    auto nh_desc = overlay_.pick_random_active_except(exclude_peer_id);
     if (!nh_desc) return false;
     nh_addr = addr_from_bytes(nh_desc->ip);
     nh_port = nh_desc->draughts_port;
@@ -815,9 +801,9 @@ bool DraughtsApp::pick_nnh_for_peer_id(const std::string& nh_peer_id,
                                        draughts::crypto::PubKey& nnh_pub) {
     bool nnh_ok = false;
     if (!nh_peer_id.empty()) {
-        auto nnh_id = node_.pick_nnh_for(nh_peer_id, exclude_peer_id);
+        auto nnh_id = overlay_.pick_nnh_for(nh_peer_id, exclude_peer_id);
         if (nnh_id) {
-            auto nnh_desc = node_.lookup_peer(*nnh_id);
+            auto nnh_desc = overlay_.lookup_peer(*nnh_id);
             if (nnh_desc) {
                 nnh_addr = addr_from_bytes(nnh_desc->ip);
                 nnh_port = nnh_desc->draughts_port;
@@ -827,7 +813,7 @@ bool DraughtsApp::pick_nnh_for_peer_id(const std::string& nh_peer_id,
     }
 
     if (!nnh_ok) {
-        auto act = node_.active_neighbors();
+        auto act = overlay_.active_neighbors();
         std::vector<proto::PeerDescriptor> candidates;
         for (const auto& d : act) {
             if (!nh_peer_id.empty() && d.peer_id == nh_peer_id) continue;
@@ -961,7 +947,7 @@ bool DraughtsApp::get_peer_pubkey_by_endpoint(const address_v4& addr,
                                               uint16_t port,
                                               draughts::crypto::PubKey& out_pubkey) const {
     if (port == 0) return false;
-    auto desc = node_.lookup_peer_by_draughts_endpoint(addr, port);
+    auto desc = overlay_.lookup_peer_by_draughts_endpoint(addr, port);
     if (!desc) return false;
     if (desc->pubkey.empty()) return false;
     std::vector<uint8_t> raw;
@@ -986,7 +972,7 @@ bool DraughtsApp::resolve_peer_target(const std::string& dest,
         if (get_peer_pubkey_by_endpoint(addr, port, out_pubkey)) {
             out_addr = addr;
             out_port = port;
-            auto desc = node_.lookup_peer_by_draughts_endpoint(addr, port);
+            auto desc = overlay_.lookup_peer_by_draughts_endpoint(addr, port);
             if (desc) out_peer_id = desc->peer_id;
             return true;
         }
@@ -1018,7 +1004,7 @@ bool DraughtsApp::resolve_peer_target(const std::string& dest,
 
     // Treat as peer_id
     out_peer_id = dest;
-    auto desc = node_.lookup_peer(dest);
+    auto desc = overlay_.lookup_peer(dest);
     if (desc && desc->draughts_port != 0 && !desc->pubkey.empty()) {
         out_addr = addr_from_bytes(desc->ip);
         out_port = desc->draughts_port;
@@ -1057,7 +1043,8 @@ bool DraughtsApp::resolve_peer_target(const std::string& dest,
 
 bool DraughtsApp::send_request_with_session(const std::string& sid,
                                             InitiatorSession& session,
-                                            const std::string& text) {
+                                            const std::string& text,
+                                            std::vector<std::string>* out) {
     address_v4 nh_addr;
     uint16_t nh_port = 0;
     draughts::crypto::PubKey nh_pub{};
@@ -1065,7 +1052,7 @@ bool DraughtsApp::send_request_with_session(const std::string& sid,
     uint16_t nnh_port = 0;
     draughts::crypto::PubKey nnh_pub{};
     if (!pick_nh_nnh(nh_addr, nh_port, nh_pub, nnh_addr, nnh_port, nnh_pub, "")) {
-        console_.println("no active neighbors to start random walk");
+        if (out) out->push_back("no active neighbors to start random walk");
         logger_.warn("cli send failed: no active neighbors");
         return false;
     }
@@ -1086,17 +1073,17 @@ bool DraughtsApp::send_request_with_session(const std::string& sid,
     addr_to_bytes(address_v4::from_string(cfg_.bind_ip), cfg_.draughts_port, p.params.c_addr_real_sender);
 
     if (!transform_real_addr(p.params.c_addr_real_receiver, ph_tmp, nh_pub)) {
-        console_.println("failed to wrap c_addr_real_receiver for first hop");
+        if (out) out->push_back("failed to wrap c_addr_real_receiver for first hop");
         logger_.warn("cli send failed: wrap c_addr_real_receiver (nh)");
         return false;
     }
     if (!transform_real_addr(p.params.c_addr_real_receiver, ph_tmp, nnh_pub)) {
-        console_.println("failed to wrap c_addr_real_receiver for second hop");
+        if (out) out->push_back("failed to wrap c_addr_real_receiver for second hop");
         logger_.warn("cli send failed: wrap c_addr_real_receiver (nnh)");
         return false;
     }
     if (!transform_real_addr(p.params.c_addr_real_sender, session.init_key, session.resp_pub)) {
-        console_.println("failed to wrap c_addr_real_sender for responder");
+        if (out) out->push_back("failed to wrap c_addr_real_sender for responder");
         logger_.warn("cli send failed: wrap c_addr_real_sender");
         return false;
     }
@@ -1113,7 +1100,7 @@ bool DraughtsApp::send_request_with_session(const std::string& sid,
     crypto::CommutativeCipher::TransformInPlace(p.c_data, draughts::kDataSize, key_iv.first, key_iv.second);
 
     if (!encrypt_params_for_next_hop(p, nh_pub, ph_tmp)) {
-        console_.println("failed to encrypt params for first hop");
+        if (out) out->push_back("failed to encrypt params for first hop");
         logger_.warn("cli send failed: encrypt params");
         return false;
     }
@@ -1124,14 +1111,16 @@ bool DraughtsApp::send_request_with_session(const std::string& sid,
                  " nnh=" + endpoint_to_string(nnh_addr, nnh_port));
 
     if (!send_packet_to(p, nh_addr, nh_port)) {
-        console_.println("failed to send packet to next hop");
+        if (out) out->push_back("failed to send packet to next hop");
         logger_.warn("cli send failed session=" + session_hex(sid));
         return false;
     }
 
     session.last_used_ms = now_ms();
-    console_.println("sent session=" + session_hex(sid) +
-                     " to responder=" + endpoint_to_string(session.resp_addr, session.resp_port));
+    if (out) {
+        out->push_back("sent session=" + session_hex(sid) +
+                       " to responder=" + endpoint_to_string(session.resp_addr, session.resp_port));
+    }
     return true;
 }
 

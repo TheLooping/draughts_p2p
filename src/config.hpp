@@ -10,7 +10,8 @@ struct Config {
     std::string bind_ip = "0.0.0.0"; // IPv4
     uint16_t overlay_port = 0;
     uint16_t draughts_port = 0;
-    std::vector<std::string> bootstraps; // "ipv4:overlay_port:draughts_port"
+    bool is_bootstrap = false;
+    std::vector<std::string> bootstrap_endpoints; // "ipv4:overlay_port:draughts_port"
 
     // Logging
     std::string log_file = "draughts.log";
@@ -20,27 +21,18 @@ struct Config {
     std::string self_info_file;
     std::string peer_info_dir;
     std::string identity_key_file;
-    bool static_topology = false;
-    std::string topology_dir;
 
     // HyParView view sizes
     size_t active_min = 4;
     size_t active_max = 8;
     size_t passive_max = 80;
 
-    // HyParView timers
-    uint32_t lease_ms = 30000;
-    uint32_t keepalive_every_ms = 10000;
-    uint32_t shuffle_every_ms = 12000;
-    uint32_t repair_every_ms = 2000;
-
     // HyParView parameters
     uint16_t join_ttl = 4;
-    size_t shuffle_k = 8;
-
-    // Two-hop neighbor maintenance
-    uint32_t neighbor_set_every_ms = 5000;
-    size_t neighbor_set_k = 8;
+    uint32_t ping_interval_ms = 10000;
+    uint32_t peer_timeout_ms = 30000;
+    uint32_t view_update_interval_ms = 5000;
+    uint32_t valid_window_s = 60;
 
     // CIPLC parameters
     double ciplc_a = 1.0;

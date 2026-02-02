@@ -16,7 +16,8 @@ add_executable(draughts_node
     src/config.cpp
     src/ciplc.cpp
     src/draughts_app.cpp
-    src/node.cpp
+    src/io_layer.cpp
+    src/overlay.cpp
     src/protocol.cpp
     src/tlv.cpp
     src/view.cpp
@@ -32,4 +33,3 @@ target_compile_definitions(draughts_node PRIVATE
 )
 
 target_link_libraries(draughts_node PRIVATE OpenSSL::Crypto pthread)
-

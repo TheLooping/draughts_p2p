@@ -10,7 +10,6 @@
 
 struct ActiveEntry {
     proto::PeerDescriptor desc;
-    uint64_t expires_at_ms = 0;
     uint64_t last_seen_ms = 0;
 };
 
@@ -30,9 +29,10 @@ public:
     size_t active_size() const { return active_.size(); }
     std::vector<proto::PeerDescriptor> active_descriptors() const;
 
-    void upsert_active(const proto::PeerDescriptor& d, uint64_t expires_at_ms);
-    void touch_active(const std::string& peer_id, uint64_t expires_at_ms);
+    void upsert_active(const proto::PeerDescriptor& d, uint64_t now_ms);
+    void touch_active(const std::string& peer_id, uint64_t now_ms);
     void remove_active(const std::string& peer_id);
+    std::optional<proto::PeerDescriptor> get_active(const std::string& peer_id) const;
 
     // Passive
     size_t passive_size() const { return passive_.size(); }
@@ -42,8 +42,8 @@ public:
     void merge_shuffle_sample(const std::vector<proto::PeerDescriptor>& sample);
 
     // Maintenance
-    void expire_active(uint64_t now_ms);
-    std::optional<std::string> evict_active_random();
+    std::vector<proto::PeerDescriptor> expire_active(uint64_t now_ms, uint64_t timeout_ms);
+    std::optional<proto::PeerDescriptor> evict_active_random();
 
 private:
     size_t passive_max_;

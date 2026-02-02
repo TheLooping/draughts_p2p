@@ -1,5 +1,7 @@
 #include "cli.hpp"
+#include "util.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <iostream>
 #include <sstream>
@@ -92,8 +94,21 @@ static bool read_line(Console& c, std::string& out) {
 
 } // namespace
 
-Cli::Cli(boost::asio::io_context& io, DraughtsNode& node, DraughtsApp& app, Console& console)
-    : io_(io), node_(node), app_(app), console_(console) {}
+namespace {
+
+static std::string peer_to_string(const proto::PeerDescriptor& d) {
+    boost::asio::ip::address_v4::bytes_type bytes{};
+    std::copy(d.ip.begin(), d.ip.end(), bytes.begin());
+    auto addr = boost::asio::ip::address_v4(bytes);
+    std::ostringstream oss;
+    oss << addr.to_string() << ":" << d.overlay_port << ":" << d.draughts_port;
+    return oss.str();
+}
+
+} // namespace
+
+Cli::Cli(boost::asio::io_context& io, HyparviewOverlay& overlay, DraughtsApp& app, Console& console)
+    : io_(io), overlay_(overlay), app_(app), console_(console) {}
 
 void Cli::start() {
     th_ = std::thread([this]{ run(); });
@@ -124,32 +139,100 @@ void Cli::run() {
 
         if (cmd == "quit" || cmd == "exit" || cmd == "q") {
             stop_.store(true);
-            boost::asio::post(io_, [this]{ node_.stop(); app_.stop(); });
+            boost::asio::post(io_, [this]{ overlay_.stop(); app_.stop(); io_.stop(); });
             break;
         }
 
         if (cmd == "id") {
-            boost::asio::post(io_, [this]{ node_.cmd_show_id(); });
+            boost::asio::post(io_, [this]{
+                auto st = overlay_.status();
+                std::ostringstream oss;
+                oss << "peer_id=" << st.self.peer_id
+                    << " bind=" << peer_to_string(st.self)
+                    << " active=" << st.active
+                    << " passive=" << st.passive;
+                console_.println(oss.str());
+            });
             continue;
         }
         if (cmd == "neighbors" || cmd == "nbr") {
-            boost::asio::post(io_, [this]{ node_.cmd_show_neighbors(); });
+            boost::asio::post(io_, [this]{
+                auto act = overlay_.active_neighbors();
+                std::ostringstream oss;
+                oss << "Active neighbors (" << act.size() << "):";
+                console_.println(oss.str());
+                if (act.empty()) {
+                    console_.println("  (none)");
+                    return;
+                }
+                for (const auto& d : act) {
+                    console_.println("  - " + d.peer_id + " @ " + peer_to_string(d));
+                }
+            });
             continue;
         }
         if (cmd == "twohop") {
-            boost::asio::post(io_, [this]{ node_.cmd_show_twohop(); });
+            boost::asio::post(io_, [this]{
+                auto entries = overlay_.twohop_snapshot();
+                console_.println("Two-hop cache entries: " + std::to_string(entries.size()));
+                if (entries.empty()) {
+                    console_.println("  (empty)");
+                    return;
+                }
+                uint64_t now = now_ms();
+                for (const auto& e : entries) {
+                    std::ostringstream oss;
+                    oss << "  * " << e.via_peer_id << " (" << e.neighbors.size() << "):";
+                    console_.println(oss.str());
+                    if (e.neighbors.empty()) {
+                        console_.println("    (none)");
+                        continue;
+                    }
+                    std::ostringstream line;
+                    line << "    ";
+                    for (size_t i = 0; i < e.neighbors.size(); ++i) {
+                        const auto& n = e.neighbors[i];
+                        if (i > 0) line << ", ";
+                        line << n.desc.peer_id;
+                        if (n.expires_at_ms <= now) line << "(stale)";
+                    }
+                    console_.println(line.str());
+                }
+            });
             continue;
         }
         if (cmd == "peers") {
-            boost::asio::post(io_, [this]{ node_.cmd_show_peers(); });
+            boost::asio::post(io_, [this]{
+                auto total = overlay_.directory_size();
+                console_.println("Known peers (directory): " + std::to_string(total));
+                auto peers = overlay_.directory_snapshot(50);
+                if (peers.empty()) {
+                    console_.println("  (empty)");
+                    return;
+                }
+                size_t n = 0;
+                for (const auto& d : peers) {
+                    console_.println("  - " + d.peer_id + " @ " + peer_to_string(d));
+                    if (++n >= 50) {
+                        console_.println("  ... (truncated)");
+                        break;
+                    }
+                }
+            });
             continue;
         }
         if (cmd == "inbox") {
-            boost::asio::post(io_, [this]{ app_.cmd_inbox(); });
+            boost::asio::post(io_, [this]{
+                auto lines = app_.cmd_inbox();
+                for (const auto& line : lines) console_.println(line);
+            });
             continue;
         }
         if (cmd == "requests") {
-            boost::asio::post(io_, [this]{ app_.cmd_requests(); });
+            boost::asio::post(io_, [this]{
+                auto lines = app_.cmd_requests();
+                for (const auto& line : lines) console_.println(line);
+            });
             continue;
         }
 
@@ -163,7 +246,10 @@ void Cli::run() {
                 console_.println("usage: send <peer_id|ipv4:port> <text>");
                 continue;
             }
-            boost::asio::post(io_, [this, ipv4, rest]{ app_.cmd_send(ipv4, rest); });
+            boost::asio::post(io_, [this, ipv4, rest]{
+                auto lines = app_.cmd_send(ipv4, rest);
+                for (const auto& line : lines) console_.println(line);
+            });
             continue;
         }
         if (cmd == "send_session") {
@@ -176,7 +262,10 @@ void Cli::run() {
                 console_.println("usage: send_session <session_hex> <text>");
                 continue;
             }
-            boost::asio::post(io_, [this, sid, rest]{ app_.cmd_send_session(sid, rest); });
+            boost::asio::post(io_, [this, sid, rest]{
+                auto lines = app_.cmd_send_session(sid, rest);
+                for (const auto& line : lines) console_.println(line);
+            });
             continue;
         }
 
@@ -190,7 +279,10 @@ void Cli::run() {
                 console_.println("usage: reply <session_hex> <text>");
                 continue;
             }
-            boost::asio::post(io_, [this, sid, rest]{ app_.cmd_reply(sid, rest); });
+            boost::asio::post(io_, [this, sid, rest]{
+                auto lines = app_.cmd_reply(sid, rest);
+                for (const auto& line : lines) console_.println(line);
+            });
             continue;
         }
 

@@ -126,60 +126,29 @@ Message make_forward_join(uint64_t nonce, uint16_t ttl, const PeerDescriptor& d)
     return Message{MsgType::FORWARD_JOIN, nonce, std::move(p)};
 }
 
-Message make_add_req(uint64_t nonce, uint32_t lease_ms, const PeerDescriptor& d) {
-    tlv::Bytes p;
-    tlv::Bytes lb; tlv::write_u32(lb, lease_ms);
-    tlv::write_tlv(p, MsgTag::LEASE_MS, lb);
-    tlv::write_tlv(p, MsgTag::DESC, d.to_tlv());
-    return Message{MsgType::ADD_REQ, nonce, std::move(p)};
+Message make_join_accept(uint64_t nonce, const PeerDescriptor& my_desc) {
+    return Message{MsgType::JOIN_ACCEPT, nonce, payload_desc_only(my_desc)};
 }
 
-Message make_add_ack(uint64_t nonce, bool accept, uint32_t lease_ms,
-                     const PeerDescriptor& my_desc,
-                     const std::vector<PeerDescriptor>& referrals) {
-    tlv::Bytes p;
-    tlv::Bytes ab; ab.push_back(static_cast<uint8_t>(accept ? 1 : 0));
-    tlv::write_tlv(p, MsgTag::ACCEPT, ab);
-    tlv::Bytes lb; tlv::write_u32(lb, lease_ms);
-    tlv::write_tlv(p, MsgTag::LEASE_MS, lb);
-    tlv::write_tlv(p, MsgTag::DESC, my_desc.to_tlv());
-    for (const auto& r : referrals) tlv::write_tlv(p, MsgTag::REFERRAL, r.to_tlv());
-    return Message{MsgType::ADD_ACK, nonce, std::move(p)};
+Message make_ping(uint64_t nonce, const PeerDescriptor& my_desc) {
+    return Message{MsgType::PING, nonce, payload_desc_only(my_desc)};
 }
 
-Message make_keepalive(uint64_t nonce, uint32_t lease_ms, const PeerDescriptor& my_desc) {
-    tlv::Bytes p;
-    tlv::Bytes lb; tlv::write_u32(lb, lease_ms);
-    tlv::write_tlv(p, MsgTag::LEASE_MS, lb);
-    tlv::write_tlv(p, MsgTag::DESC, my_desc.to_tlv());
-    return Message{MsgType::KEEPALIVE, nonce, std::move(p)};
+Message make_pong(uint64_t nonce, const PeerDescriptor& my_desc) {
+    return Message{MsgType::PONG, nonce, payload_desc_only(my_desc)};
 }
 
-Message make_remove_notice(uint64_t nonce, const std::string& reason) {
-    tlv::Bytes p;
-    tlv::write_tlv_str(p, MsgTag::REASON, reason);
-    return Message{MsgType::REMOVE_NOTICE, nonce, std::move(p)};
-}
-
-Message make_shuffle_req(uint64_t nonce, const std::vector<PeerDescriptor>& sample) {
-    tlv::Bytes p;
-    for (const auto& d : sample) tlv::write_tlv(p, MsgTag::DESC, d.to_tlv());
-    return Message{MsgType::SHUFFLE_REQ, nonce, std::move(p)};
-}
-
-Message make_shuffle_resp(uint64_t nonce, const std::vector<PeerDescriptor>& sample) {
-    tlv::Bytes p;
-    for (const auto& d : sample) tlv::write_tlv(p, MsgTag::DESC, d.to_tlv());
-    return Message{MsgType::SHUFFLE_RESP, nonce, std::move(p)};
-}
-
-Message make_neighbor_set(uint64_t nonce, const PeerDescriptor& sender, const std::vector<PeerDescriptor>& neighbors) {
+Message make_view_update(uint64_t nonce, const PeerDescriptor& sender, const std::vector<PeerDescriptor>& neighbors) {
     tlv::Bytes p;
     tlv::write_tlv(p, MsgTag::DESC, sender.to_tlv());
     for (const auto& d : neighbors) {
         tlv::write_tlv(p, MsgTag::NEIGHBOR, d.to_tlv());
     }
-    return Message{MsgType::NEIGHBOR_SET, nonce, std::move(p)};
+    return Message{MsgType::VIEW_UPDATE, nonce, std::move(p)};
+}
+
+Message make_view_update_req(uint64_t nonce, const PeerDescriptor& sender) {
+    return Message{MsgType::VIEW_UPDATE_REQ, nonce, payload_desc_only(sender)};
 }
 
 } // namespace proto

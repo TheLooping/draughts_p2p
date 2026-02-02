@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <list>
 #include <string>
 #include <unordered_map>
@@ -13,30 +14,35 @@
 
 #include "ciplc.hpp"
 #include "config.hpp"
-#include "console.hpp"
 #include "crypto/Crypto.h"
 #include "draughts_packet.hpp"
+#include "io_layer.hpp"
 #include "logger.hpp"
-#include "node.hpp"
+#include "overlay.hpp"
 
 class DraughtsApp {
 public:
     DraughtsApp(boost::asio::io_context& io,
                 Config cfg,
-                DraughtsNode& node,
+                HyparviewOverlay& overlay,
+                IoLayer& io_layer,
                 draughts::crypto::Sm2KeyPair identity,
-                Logger& logger,
-                Console& console);
+                Logger& logger);
 
     bool start();
     void stop();
 
+    void on_datagram(const tlv::Bytes& bytes,
+                     const boost::asio::ip::udp::endpoint& from);
+
+    void set_notify(std::function<void(const std::string&)> cb);
+
     // CLI actions
-    void cmd_send(const std::string& dest, const std::string& text);
-    void cmd_send_session(const std::string& session_hex, const std::string& text);
-    void cmd_inbox();
-    void cmd_requests();
-    void cmd_reply(const std::string& session_hex, const std::string& text);
+    std::vector<std::string> cmd_send(const std::string& dest, const std::string& text);
+    std::vector<std::string> cmd_send_session(const std::string& session_hex, const std::string& text);
+    std::vector<std::string> cmd_inbox() const;
+    std::vector<std::string> cmd_requests() const;
+    std::vector<std::string> cmd_reply(const std::string& session_hex, const std::string& text);
 
 private:
     using udp = boost::asio::ip::udp;
@@ -90,10 +96,6 @@ private:
         std::unordered_map<std::string, std::deque<std::list<Entry>::iterator>> index_;
         size_t capacity_ = 0;
     };
-
-    void do_receive();
-    void on_datagram(const std::array<uint8_t, draughts::kPacketSize>& bytes,
-                     const udp::endpoint& from);
 
     void handle_exit_packet(draughts::DraughtsPacket& p, const udp::endpoint& from);
     void handle_random_walk(draughts::DraughtsPacket& p, const udp::endpoint& from);
@@ -156,20 +158,18 @@ private:
 
     bool send_request_with_session(const std::string& sid,
                                    InitiatorSession& session,
-                                   const std::string& text);
+                                   const std::string& text,
+                                   std::vector<std::string>* out);
     void prune_sessions();
 
 private:
     boost::asio::io_context& io_;
     Config cfg_;
-    DraughtsNode& node_;
+    HyparviewOverlay& overlay_;
+    IoLayer& io_layer_;
     draughts::crypto::Sm2KeyPair identity_;
     Logger& logger_;
-    Console& console_;
-
-    udp::socket sock_;
-    udp::endpoint remote_;
-    std::array<uint8_t, draughts::kPacketSize> rxbuf_{};
+    std::function<void(const std::string&)> notify_;
 
     std::unordered_set<std::string> initiator_session_ids_;
     std::unordered_map<std::string, InitiatorSession> initiator_sessions_;

@@ -12,8 +12,9 @@
 #include "console.hpp"
 #include "crypto/Crypto.h"
 #include "draughts_app.hpp"
+#include "io_layer.hpp"
 #include "logger.hpp"
-#include "node.hpp"
+#include "overlay.hpp"
 
 namespace {
 
@@ -82,27 +83,44 @@ int main(int argc, char** argv) {
     self.peer_id = cfg.peer_id;
     self.pubkey = b64::encode(pub_vec);
 
-    DraughtsNode node(io, cfg, self, logger, console);
-    if (!node.start()) {
-        std::cerr << "failed to start node (overlay bind failed)\n";
+    IoLayer io_layer(io, logger);
+    HyparviewOverlay overlay(io_layer, cfg, self, logger);
+    DraughtsApp app(io, cfg, overlay, io_layer, std::move(*identity), logger);
+    app.set_notify([&console](const std::string& line) { console.println(line); });
+
+    io_layer.set_overlay_handler([&overlay](const tlv::Bytes& bytes,
+                                            const boost::asio::ip::udp::endpoint& from) {
+        overlay.on_datagram(bytes, from);
+    });
+    io_layer.set_draughts_handler([&app](const tlv::Bytes& bytes,
+                                         const boost::asio::ip::udp::endpoint& from) {
+        app.on_datagram(bytes, from);
+    });
+    if (!io_layer.start(cfg.bind_ip, cfg.overlay_port, cfg.draughts_port)) {
+        std::cerr << "failed to start io layer (bind failed)\n";
         return 2;
     }
 
-    DraughtsApp app(io, cfg, node, std::move(*identity), logger, console);
+    if (!overlay.start()) {
+        std::cerr << "failed to start overlay\n";
+        return 2;
+    }
     if (!app.start()) {
-        std::cerr << "failed to start draughts app (bind failed)\n";
+        std::cerr << "failed to start draughts app\n";
         return 2;
     }
 
     boost::asio::signal_set signals(io, SIGINT, SIGTERM);
     signals.async_wait([&](const boost::system::error_code&, int) {
         app.stop();
-        node.stop();
+        overlay.stop();
+        io_layer.stop();
+        io.stop();
     });
 
     std::unique_ptr<Cli> cli;
     if (cfg.cli_enabled) {
-        cli = std::make_unique<Cli>(io, node, app, console);
+        cli = std::make_unique<Cli>(io, overlay, app, console);
         cli->start();
     }
 

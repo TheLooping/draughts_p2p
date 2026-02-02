@@ -17,15 +17,11 @@ enum class MsgType : uint8_t {
     // HyParView (overlay maintenance)
     JOIN = 1,
     FORWARD_JOIN = 2,
-    ADD_REQ = 3,
-    ADD_ACK = 4,
-    KEEPALIVE = 5,
-    REMOVE_NOTICE = 6,
-    SHUFFLE_REQ = 7,
-    SHUFFLE_RESP = 8,
-
-    // Additional maintenance
-    NEIGHBOR_SET = 9,
+    JOIN_ACCEPT = 3,
+    PING = 4,
+    PONG = 5,
+    VIEW_UPDATE = 6,
+    VIEW_UPDATE_REQ = 7,
 
     // Application
     APP_PACKET = 20
@@ -60,27 +56,20 @@ Message make_join(uint64_t nonce, const PeerDescriptor& d);
 // FORWARD_JOIN: [TTL(u16)] [DESC]
 Message make_forward_join(uint64_t nonce, uint16_t ttl, const PeerDescriptor& d);
 
-// ADD_REQ: [LEASE_MS(u32)] [DESC]
-Message make_add_req(uint64_t nonce, uint32_t lease_ms, const PeerDescriptor& d);
-// ADD_ACK: [ACCEPT(u8)] [LEASE_MS(u32)] [MY_DESC] [REFERRAL_DESC...]
-Message make_add_ack(uint64_t nonce, bool accept, uint32_t lease_ms,
-                     const PeerDescriptor& my_desc,
-                     const std::vector<PeerDescriptor>& referrals);
+// JOIN_ACCEPT: [DESC]
+Message make_join_accept(uint64_t nonce, const PeerDescriptor& my_desc);
 
-// KEEPALIVE: [LEASE_MS(u32)] [MY_DESC]
-Message make_keepalive(uint64_t nonce, uint32_t lease_ms, const PeerDescriptor& my_desc);
+// PING/PONG: [DESC]
+Message make_ping(uint64_t nonce, const PeerDescriptor& my_desc);
+Message make_pong(uint64_t nonce, const PeerDescriptor& my_desc);
 
-// REMOVE_NOTICE: [REASON(str)]
-Message make_remove_notice(uint64_t nonce, const std::string& reason);
+// VIEW_UPDATE: [SENDER_DESC] [NEIGHBOR_DESC...]
+Message make_view_update(uint64_t nonce,
+                         const PeerDescriptor& sender,
+                         const std::vector<PeerDescriptor>& neighbors);
 
-// SHUFFLE_REQ/RESP: [DESC...]
-Message make_shuffle_req(uint64_t nonce, const std::vector<PeerDescriptor>& sample);
-Message make_shuffle_resp(uint64_t nonce, const std::vector<PeerDescriptor>& sample);
-
-// NEIGHBOR_SET: [SENDER_DESC] [NEIGHBOR_DESC...]
-Message make_neighbor_set(uint64_t nonce,
-                          const PeerDescriptor& sender,
-                          const std::vector<PeerDescriptor>& neighbors);
+// VIEW_UPDATE_REQ: [DESC]
+Message make_view_update_req(uint64_t nonce, const PeerDescriptor& sender);
 
 // Tags for descriptor TLVs
 enum DescTag : uint16_t {
@@ -98,11 +87,7 @@ enum DescTag : uint16_t {
 enum MsgTag : uint16_t {
     // overlay tags
     TTL = 10,
-    LEASE_MS = 11,
-    ACCEPT = 12,
     DESC = 13,
-    REFERRAL = 14,
-    REASON = 15,
     NEIGHBOR = 16,
 
     // app tags (>= 100)

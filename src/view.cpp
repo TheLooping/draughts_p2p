@@ -12,11 +12,10 @@ std::vector<proto::PeerDescriptor> Views::active_descriptors() const {
     return out;
 }
 
-void Views::upsert_active(const proto::PeerDescriptor& d, uint64_t expires_at_ms) {
+void Views::upsert_active(const proto::PeerDescriptor& d, uint64_t now_ms) {
     ActiveEntry e;
     e.desc = d;
-    e.expires_at_ms = expires_at_ms;
-    e.last_seen_ms = now_ms();
+    e.last_seen_ms = now_ms;
     active_[d.peer_id] = std::move(e);
 
     // When someone becomes active, we can keep it out of passive to reduce duplicates
@@ -25,15 +24,20 @@ void Views::upsert_active(const proto::PeerDescriptor& d, uint64_t expires_at_ms
     }
 }
 
-void Views::touch_active(const std::string& peer_id, uint64_t expires_at_ms) {
+void Views::touch_active(const std::string& peer_id, uint64_t now_ms) {
     auto it = active_.find(peer_id);
     if (it == active_.end()) return;
-    it->second.last_seen_ms = now_ms();
-    it->second.expires_at_ms = expires_at_ms;
+    it->second.last_seen_ms = now_ms;
 }
 
 void Views::remove_active(const std::string& peer_id) {
     active_.erase(peer_id);
+}
+
+std::optional<proto::PeerDescriptor> Views::get_active(const std::string& peer_id) const {
+    auto it = active_.find(peer_id);
+    if (it == active_.end()) return std::nullopt;
+    return it->second.desc;
 }
 
 void Views::insert_passive(const proto::PeerDescriptor& d) {
@@ -100,21 +104,26 @@ void Views::merge_shuffle_sample(const std::vector<proto::PeerDescriptor>& sampl
     for (const auto& d : sample) insert_passive(d);
 }
 
-void Views::expire_active(uint64_t now) {
+std::vector<proto::PeerDescriptor> Views::expire_active(uint64_t now, uint64_t timeout_ms) {
+    std::vector<proto::PeerDescriptor> removed;
     std::vector<std::string> to_remove;
     for (const auto& kv : active_) {
-        if (kv.second.expires_at_ms <= now) to_remove.push_back(kv.first);
+        if (now - kv.second.last_seen_ms > timeout_ms) {
+            to_remove.push_back(kv.first);
+            removed.push_back(kv.second.desc);
+        }
     }
     for (const auto& id : to_remove) active_.erase(id);
+    return removed;
 }
 
-std::optional<std::string> Views::evict_active_random() {
+std::optional<proto::PeerDescriptor> Views::evict_active_random() {
     if (active_.empty()) return std::nullopt;
     std::uniform_int_distribution<size_t> dist(0, active_.size()-1);
     size_t idx = dist(rng_);
     auto it = active_.begin();
     std::advance(it, idx);
-    std::string id = it->first;
+    auto desc = it->second.desc;
     active_.erase(it);
-    return id;
+    return desc;
 }
