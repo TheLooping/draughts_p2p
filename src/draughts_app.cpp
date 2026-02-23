@@ -484,8 +484,8 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
         address_v4 nnh_addr;
         uint16_t nnh_port = 0;
         draughts::crypto::PubKey nnh_pub{};
-        if (!pick_nnh_for_peer_id(nh_peer_id, exclude_peer_id, nnh_addr, nnh_port, nnh_pub)) {
-            logger_.warn("failed to pick nnh for response bootstrap");
+        if (!pick_nnh_for_peer_id(nh_peer_id, exclude_peer_id, nnh_addr, nnh_port, nnh_pub, true)) {
+            logger_.warn("failed to pick nnh from nh neighbors for response bootstrap");
             return;
         }
 
@@ -493,6 +493,7 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
         auto ph_pub = ph_tmp.public_key_raw();
         std::memcpy(p.pk_ph_tmp, ph_pub.data(), draughts::kPkSize);
 
+        // Return-entry behavior: keep c_addr_real_receiver opaque and only add one layer for picked decoy NNH.
         if (!transform_real_addr(p.params.c_addr_real_receiver, ph_tmp, nnh_pub)) {
             logger_.warn("failed to add layer to c_addr_real_receiver at response first hop");
             return;
@@ -534,6 +535,7 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
             logger_.warn("invalid pk_pph_tmp for outnode");
             return;
         }
+        // Request-phase outnode does not touch c_addr_real_sender; only peel receiver route target.
         if (response_flow) {
             draughts::crypto::PubKey pk_pph{};
             std::memcpy(pk_pph.data(), p.params.pk_pph_tmp, draughts::kPkSize);
@@ -691,8 +693,8 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     uint16_t nnh_port = 0;
     draughts::crypto::PubKey nnh_pub{};
     if (!response_flow) {
-        if (!pick_nnh_for_peer_id(outnode_peer_id, exclude_peer_id, nnh_addr, nnh_port, nnh_pub)) {
-            logger_.warn("failed to pick nnh for outnode leg");
+        if (!pick_nnh_for_peer_id(outnode_peer_id, exclude_peer_id, nnh_addr, nnh_port, nnh_pub, true)) {
+            logger_.warn("failed to pick nnh from outnode neighbors for outnode leg");
             return;
         }
     }
@@ -812,10 +814,11 @@ bool DraughtsApp::pick_nnh_for_peer_id(const std::string& nh_peer_id,
                                        const std::string& exclude_peer_id,
                                        address_v4& nnh_addr,
                                        uint16_t& nnh_port,
-                                       draughts::crypto::PubKey& nnh_pub) {
+                                       draughts::crypto::PubKey& nnh_pub,
+                                       bool strict_from_nh_neighbors) {
     bool nnh_ok = false;
     if (!nh_peer_id.empty()) {
-        auto nnh_id = node_.pick_nnh_for(nh_peer_id, exclude_peer_id);
+        auto nnh_id = node_.pick_nnh_for(nh_peer_id, exclude_peer_id, strict_from_nh_neighbors);
         if (nnh_id) {
             auto nnh_desc = node_.lookup_peer(*nnh_id);
             if (nnh_desc) {
@@ -826,7 +829,7 @@ bool DraughtsApp::pick_nnh_for_peer_id(const std::string& nh_peer_id,
         }
     }
 
-    if (!nnh_ok) {
+    if (!nnh_ok && !strict_from_nh_neighbors) {
         auto act = node_.active_neighbors();
         std::vector<proto::PeerDescriptor> candidates;
         for (const auto& d : act) {

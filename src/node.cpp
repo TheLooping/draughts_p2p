@@ -294,7 +294,8 @@ std::optional<proto::PeerDescriptor> DraughtsNode::pick_random_active_except(con
 }
 
 std::optional<std::string> DraughtsNode::pick_nnh_for(const std::string& nh_peer_id,
-                                                     const std::string& exclude_peer_id) const {
+                                                     const std::string& exclude_peer_id,
+                                                     bool strict_twohop) const {
     // Prefer two-hop cache entry for NH
     auto it = twohop_.find(nh_peer_id);
     if (it != twohop_.end()) {
@@ -311,6 +312,7 @@ std::optional<std::string> DraughtsNode::pick_nnh_for(const std::string& nh_peer
             return c[dist(rng_)];
         }
     }
+    if (strict_twohop) return std::nullopt;
 
     // Fallback: pick from our active view
     std::vector<std::string> c;

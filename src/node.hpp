@@ -39,7 +39,8 @@ public:
                                                                           uint16_t port) const;
     std::optional<proto::PeerDescriptor> pick_random_active_except(const std::string& exclude_peer_id) const;
     std::optional<std::string> pick_nnh_for(const std::string& nh_peer_id,
-                                           const std::string& exclude_peer_id) const;
+                                           const std::string& exclude_peer_id,
+                                           bool strict_twohop = false) const;
 
 private:
     struct TwoHopEntry {

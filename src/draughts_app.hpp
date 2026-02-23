@@ -122,7 +122,8 @@ private:
                               const std::string& exclude_peer_id,
                               boost::asio::ip::address_v4& nnh_addr,
                               uint16_t& nnh_port,
-                              draughts::crypto::PubKey& nnh_pub);
+                              draughts::crypto::PubKey& nnh_pub,
+                              bool strict_from_nh_neighbors = false);
 
     static std::string session_hex(const std::string& sid);
     static bool parse_session_hex(const std::string& session_hex, std::string& sid);
