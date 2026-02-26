@@ -9,6 +9,8 @@
 #include <unistd.h>
 
 #include <cctype>
+#include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <sstream>
@@ -45,7 +47,10 @@ bool TopodClient::pick_route(const std::string& exclude_peer_id, RoutePlan& out)
 
     std::string status;
     std::unordered_map<std::string, std::string> kv;
-    if (!parse_line(resp, status, kv)) return false;
+    if (!parse_line(resp, status, kv)) {
+        logger_.warn("topod PLAN 响应解析失败: " + resp);
+        return false;
+    }
     if (status != "OK") {
         logger_.warn("topod PLAN failed: " + resp);
         return false;
@@ -85,7 +90,10 @@ bool TopodClient::pick_history_nnh(const std::string& nh_peer_id,
 
     std::string status;
     std::unordered_map<std::string, std::string> kv;
-    if (!parse_line(resp, status, kv)) return false;
+    if (!parse_line(resp, status, kv)) {
+        logger_.warn("topod HISTORY 响应解析失败: " + resp);
+        return false;
+    }
     if (status == "NOT_FOUND") return false;
     if (status != "OK") {
         logger_.warn("topod HISTORY failed: " + resp);
@@ -96,6 +104,8 @@ bool TopodClient::pick_history_nnh(const std::string& nh_peer_id,
 
 bool TopodClient::exchange(const std::string& request, std::string& response) const {
     if (!enabled()) return false;
+    auto start = std::chrono::steady_clock::now();
+    logger_.info("topod IPC 请求开始: socket=" + socket_path_ + " req=\"" + request + "\"");
     if (socket_path_.size() >= sizeof(sockaddr_un::sun_path)) {
         logger_.warn("topod socket path too long");
         return false;
@@ -103,7 +113,7 @@ bool TopodClient::exchange(const std::string& request, std::string& response) co
 
     int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
-        logger_.warn("topod socket() failed");
+        logger_.warn(std::string("topod socket() failed: ") + std::strerror(errno));
         return false;
     }
 
@@ -118,7 +128,7 @@ bool TopodClient::exchange(const std::string& request, std::string& response) co
     std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", socket_path_.c_str());
 
     if (::connect(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
-        logger_.warn("topod connect failed: " + socket_path_);
+        logger_.warn("topod connect failed: " + socket_path_ + " err=" + std::strerror(errno));
         ::close(fd);
         return false;
     }
@@ -128,6 +138,7 @@ bool TopodClient::exchange(const std::string& request, std::string& response) co
     while (sent < payload.size()) {
         ssize_t n = ::send(fd, payload.data() + sent, payload.size() - sent, 0);
         if (n <= 0) {
+            logger_.warn("topod send failed req=\"" + request + "\" err=" + std::strerror(errno));
             ::close(fd);
             return false;
         }
@@ -138,14 +149,25 @@ bool TopodClient::exchange(const std::string& request, std::string& response) co
     char ch = 0;
     while (true) {
         ssize_t n = ::recv(fd, &ch, 1, 0);
-        if (n <= 0) break;
+        if (n < 0) {
+            logger_.warn("topod recv failed req=\"" + request + "\" err=" + std::strerror(errno));
+            break;
+        }
+        if (n == 0) break;
         if (ch == '\n') break;
         line.push_back(ch);
     }
     ::close(fd);
 
     line = trim(line);
-    if (line.empty()) return false;
+    if (line.empty()) {
+        logger_.warn("topod 响应为空 req=\"" + request + "\"");
+        return false;
+    }
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+    logger_.info("topod IPC 请求完成: elapsed=" + std::to_string(elapsed.count()) +
+                 "ms req=\"" + request + "\" resp=\"" + line + "\"");
     response = std::move(line);
     return true;
 }
