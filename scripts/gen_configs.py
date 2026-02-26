@@ -22,6 +22,8 @@ self_info_file = {self_info_file}
 peer_info_dir = {peer_info_dir}
 identity_key_file = {identity_key_file}
 topology_dir = {topology_dir}
+topod_ipc_socket = {topod_ipc_socket}
+topod_timeout_ms = {topod_timeout_ms}
 
 # Static topology degree expectations
 active_min = {active_min}
@@ -47,7 +49,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bind-ip", default="127.0.0.1", help="IPv4 bind address shared by all nodes")
     p.add_argument("--overlay-base", type=int, default=4000, help="base overlay port")
     p.add_argument("--draughts-base", type=int, default=5000, help="base draughts port")
+    p.add_argument("--topod-base", type=int, default=6000, help="base TopoDaemon port")
     p.add_argument("--out-dir", default="config/generated", help="output config directory")
+    p.add_argument("--topod-config-dir", default="config/topod", help="TopoDaemon config directory")
+    p.add_argument("--topod-socket-dir", default="run/topod", help="TopoDaemon local IPC socket directory")
     p.add_argument("--log-dir", default="logs", help="log directory")
     p.add_argument("--neighbors-dir", default="neighbors", help="active neighbor file directory")
     p.add_argument("--peer-info-dir", default="peers", help="self info file directory")
@@ -57,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cli-nodes", default="10,20", help="comma-separated node indices to enable CLI")
     p.add_argument("--active-min", type=int, default=3, help="minimum active neighbors / degree")
     p.add_argument("--active-max", type=int, default=5, help="maximum active neighbors / degree")
+    p.add_argument("--topod-bootstrap", type=int, default=3, help="bootstrap peers each TopoDaemon can use")
     p.add_argument("--force-keys", action="store_true", help="overwrite existing key files")
     p.add_argument("--seed", type=int, default=None, help="random seed for topology generation")
     return p.parse_args()
@@ -264,6 +270,8 @@ def main() -> None:
         raise SystemExit("--count must be > 0")
 
     out_dir = Path(args.out_dir)
+    topod_config_dir = Path(args.topod_config_dir)
+    topod_socket_dir = Path(args.topod_socket_dir)
     log_dir = Path(args.log_dir)
     neighbors_dir = Path(args.neighbors_dir)
     peer_info_dir = Path(args.peer_info_dir)
@@ -271,6 +279,8 @@ def main() -> None:
     topology_dir = Path(args.topology_dir)
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    topod_config_dir.mkdir(parents=True, exist_ok=True)
+    topod_socket_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
     neighbors_dir.mkdir(parents=True, exist_ok=True)
     peer_info_dir.mkdir(parents=True, exist_ok=True)
@@ -290,6 +300,8 @@ def main() -> None:
 
     node_ids = [f"node{i}" for i in range(1, args.count + 1)]
     rng = random.Random(args.seed)
+    topod_addrs = [f"{args.bind_ip}:{args.topod_base + i}" for i in range(args.count)]
+    topod_bootstrap = max(1, min(args.topod_bootstrap, args.count))
 
     adjacency = generate_connected_topology(args.count, args.active_min, args.active_max, rng)
     adjacency_json = {node_ids[i]: [node_ids[j] for j in sorted(neigh)]
@@ -304,6 +316,8 @@ def main() -> None:
     for i, peer_id in enumerate(node_ids, start=1):
         overlay_port = args.overlay_base + (i - 1)
         draughts_port = args.draughts_base + (i - 1)
+        topod_addr = topod_addrs[i - 1]
+        topod_socket = topod_socket_dir / f"{peer_id}.sock"
         if cli_nodes:
             cli_enabled = "true" if i in cli_nodes else "false"
         else:
@@ -320,6 +334,7 @@ def main() -> None:
                 f"overlay_port = {overlay_port}",
                 f"draughts_port = {draughts_port}",
                 f"pubkey = {pub_b64}",
+                f"topod_addr = {topod_addr}",
                 "",
             ])
         )
@@ -337,6 +352,8 @@ def main() -> None:
             peer_info_dir=peer_info_dir.as_posix(),
             identity_key_file=priv_path.as_posix(),
             topology_dir=topology_dir.as_posix(),
+            topod_ipc_socket=topod_socket.as_posix(),
+            topod_timeout_ms=1500,
             active_min=args.active_min,
             active_max=args.active_max,
             ciplc_a=1.0,
@@ -351,7 +368,25 @@ def main() -> None:
         path = out_dir / f"{peer_id}.conf"
         path.write_text(content)
 
+        if i == 1:
+            bootstrap = []
+        else:
+            bootstrap = topod_addrs[:min(i - 1, topod_bootstrap)]
+        topod_cfg = {
+            "peer_id": peer_id,
+            "listen_addr": topod_addr,
+            "ipc_socket": topod_socket.as_posix(),
+            "peer_info_dir": peer_info_dir.as_posix(),
+            "snapshot_limit": 10,
+            "shuffle_interval_ms": 30000,
+            "keepalive_interval_ms": 8000,
+            "join_retry_ms": 1200,
+            "bootstrap": bootstrap,
+        }
+        (topod_config_dir / f"{peer_id}.json").write_text(json.dumps(topod_cfg, ensure_ascii=True, indent=2) + "\n")
+
     print(f"generated {args.count} configs in {out_dir}")
+    print(f"generated TopoDaemon configs in {topod_config_dir}")
     print(f"keys dir: {keys_dir}")
     print(f"peer info dir: {peer_info_dir}")
     print(f"topology dir: {topology_dir}")

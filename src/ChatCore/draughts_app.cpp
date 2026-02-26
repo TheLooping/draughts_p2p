@@ -143,6 +143,7 @@ DraughtsApp::DraughtsApp(boost::asio::io_context& io,
       console_(console),
       sock_(io_),
       responder_lru_(kResponderLruCapacity),
+      topod_(cfg_, logger_),
       t_housekeeping_(io_) {
     ciplc_.a = cfg_.ciplc_a;
     ciplc_.b = cfg_.ciplc_b;
@@ -329,6 +330,7 @@ void DraughtsApp::cmd_reply(const std::string& session_hex_in, const std::string
     std::memcpy(p.params.c_addr_real_receiver, value.c_addr_real_sender.data(), draughts::kAddrSize);
     draughts::zero_addr(p.params.c_addr_real_sender);
 
+    p.params.topo_term = value.topo_term;
     p.params.x = -2.0;
     p.params.magic_num = cfg_.magic_num;
     std::memcpy(p.session_id, sid.data(), draughts::kSessionIdSize);
@@ -451,6 +453,7 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
             value.port_nnh = 0;
         }
         std::memcpy(value.c_addr_real_sender.data(), c_addr_real_sender.data(), draughts::kAddrSize);
+        value.topo_term = p.params.topo_term;
         value.created_ms = now_ms();
         responder_lru_.insert_head(sid, value);
 
@@ -484,7 +487,7 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
         address_v4 nnh_addr;
         uint16_t nnh_port = 0;
         draughts::crypto::PubKey nnh_pub{};
-        if (!pick_nnh_for_peer_id(nh_peer_id, exclude_peer_id, nnh_addr, nnh_port, nnh_pub, true)) {
+        if (!pick_nnh_for_peer_id(nh_peer_id, exclude_peer_id, p.params.topo_term, nnh_addr, nnh_port, nnh_pub, true)) {
             logger_.warn("failed to pick nnh from nh neighbors for response bootstrap");
             return;
         }
@@ -613,7 +616,7 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
         address_v4 nnh_addr;
         uint16_t nnh_port = 0;
         draughts::crypto::PubKey nnh_pub{};
-        if (!pick_nnh_for_peer_id(nh_peer_id, exclude_peer_id, nnh_addr, nnh_port, nnh_pub)) {
+        if (!pick_nnh_for_peer_id(nh_peer_id, exclude_peer_id, p.params.topo_term, nnh_addr, nnh_port, nnh_pub)) {
             logger_.warn("failed to pick nnh for relay");
             return;
         }
@@ -693,7 +696,7 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     uint16_t nnh_port = 0;
     draughts::crypto::PubKey nnh_pub{};
     if (!response_flow) {
-        if (!pick_nnh_for_peer_id(outnode_peer_id, exclude_peer_id, nnh_addr, nnh_port, nnh_pub, true)) {
+        if (!pick_nnh_for_peer_id(outnode_peer_id, exclude_peer_id, p.params.topo_term, nnh_addr, nnh_port, nnh_pub, true)) {
             logger_.warn("failed to pick nnh from outnode neighbors for outnode leg");
             return;
         }
@@ -798,7 +801,25 @@ bool DraughtsApp::pick_nh_nnh(address_v4& nh_addr,
                               address_v4& nnh_addr,
                               uint16_t& nnh_port,
                               draughts::crypto::PubKey& nnh_pub,
+                              std::uint64_t& topo_term,
                               const std::string& exclude_peer_id) {
+    topo_term = 0;
+    if (topod_.enabled()) {
+        TopodClient::RoutePlan plan{};
+        if (topod_.pick_route(exclude_peer_id, plan)) {
+            nh_addr = plan.nh.addr;
+            nh_port = plan.nh.port;
+            nh_pub = plan.nh.pubkey;
+            nnh_addr = plan.nnh.addr;
+            nnh_port = plan.nnh.port;
+            nnh_pub = plan.nnh.pubkey;
+            topo_term = plan.term;
+            return true;
+        }
+        logger_.warn("topod PLAN query failed");
+        return false;
+    }
+
     auto nh_desc = node_.pick_random_active_except(exclude_peer_id);
     if (!nh_desc) return false;
     nh_addr = addr_from_bytes(nh_desc->ip);
@@ -807,15 +828,30 @@ bool DraughtsApp::pick_nh_nnh(address_v4& nh_addr,
 
     if (!get_peer_pubkey_by_endpoint(nh_addr, nh_port, nh_pub)) return false;
 
-    return pick_nnh_for_peer_id(nh_desc->peer_id, exclude_peer_id, nnh_addr, nnh_port, nnh_pub);
+    return pick_nnh_for_peer_id(nh_desc->peer_id, exclude_peer_id, topo_term, nnh_addr, nnh_port, nnh_pub);
 }
 
 bool DraughtsApp::pick_nnh_for_peer_id(const std::string& nh_peer_id,
                                        const std::string& exclude_peer_id,
+                                       std::uint64_t topo_term,
                                        address_v4& nnh_addr,
                                        uint16_t& nnh_port,
                                        draughts::crypto::PubKey& nnh_pub,
                                        bool strict_from_nh_neighbors) {
+    if (topod_.enabled()) {
+        if (nh_peer_id.empty() || topo_term == 0) {
+            return false;
+        }
+        TopodClient::HopInfo nnh{};
+        if (topod_.pick_history_nnh(nh_peer_id, topo_term, exclude_peer_id, strict_from_nh_neighbors, nnh)) {
+            nnh_addr = nnh.addr;
+            nnh_port = nnh.port;
+            nnh_pub = nnh.pubkey;
+            return true;
+        }
+        return false;
+    }
+
     bool nnh_ok = false;
     if (!nh_peer_id.empty()) {
         auto nnh_id = node_.pick_nnh_for(nh_peer_id, exclude_peer_id, strict_from_nh_neighbors);
@@ -1067,7 +1103,8 @@ bool DraughtsApp::send_request_with_session(const std::string& sid,
     address_v4 nnh_addr;
     uint16_t nnh_port = 0;
     draughts::crypto::PubKey nnh_pub{};
-    if (!pick_nh_nnh(nh_addr, nh_port, nh_pub, nnh_addr, nnh_port, nnh_pub, "")) {
+    std::uint64_t topo_term = 0;
+    if (!pick_nh_nnh(nh_addr, nh_port, nh_pub, nnh_addr, nnh_port, nnh_pub, topo_term, "")) {
         console_.println("no active neighbors to start random walk");
         logger_.warn("cli send failed: no active neighbors");
         return false;
@@ -1105,6 +1142,7 @@ bool DraughtsApp::send_request_with_session(const std::string& sid,
     }
 
     p.params.x = cfg_.ciplc_x0;
+    p.params.topo_term = topo_term;
     p.params.magic_num = cfg_.magic_num;
 
     std::uint8_t pt[draughts::kDataSize] = {};

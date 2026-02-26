@@ -99,7 +99,7 @@ start_cfg() {
   local name
   name=$(basename "$cfg" .conf)
   local out="$RUN_DIR/$name.out"
-  "$BINARY" "$cfg" > "$out" 2>&1 &
+  ( exec -a ChatCore "$BINARY" "$cfg" ) > "$out" 2>&1 &
   echo "$! $cfg" >> "$PID_FILE"
   echo "started $cfg (pid=$!)"
 }

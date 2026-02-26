@@ -4,11 +4,26 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
 "$ROOT/scripts/stop_nodes.sh" "$ROOT/run/nodes.pids" || true
+"$ROOT/scripts/stop_nodes.sh" "$ROOT/run/hyparview_chatcore.pids" || true
+"$ROOT/scripts/stop_nodes.sh" "$ROOT/run/hyparview_topod.pids" || true
 
 if pgrep -f "$ROOT/build/draughts_node" >/dev/null 2>&1; then
   pkill -TERM -f "$ROOT/build/draughts_node" || true
   sleep 0.5
   pkill -KILL -f "$ROOT/build/draughts_node" || true
+fi
+if pgrep -f "$ROOT/build/ChatCore" >/dev/null 2>&1; then
+  pkill -TERM -f "$ROOT/build/ChatCore" || true
+  sleep 0.5
+  pkill -KILL -f "$ROOT/build/ChatCore" || true
+fi
+if pgrep -f "$ROOT/build/TopoDaemon" >/dev/null 2>&1; then
+  pkill -TERM -f "$ROOT/build/TopoDaemon" || true
+  sleep 0.5
+  pkill -KILL -f "$ROOT/build/TopoDaemon" || true
+fi
+if pgrep -f "TopoDaemon" >/dev/null 2>&1; then
+  pkill -TERM -f "TopoDaemon" || true
 fi
 
 if pgrep -f "$ROOT/scripts/topology_collector.py" >/dev/null 2>&1; then
@@ -26,6 +41,7 @@ rm -rf "$ROOT/run" \
        "$ROOT/keys" \
        "$ROOT/topology" \
        "$ROOT/config/generated" \
+       "$ROOT/config/topod" \
        "$ROOT/topology_state.json" \
        "$ROOT/topology_matrix.csv" \
        "$ROOT/draughts.log"

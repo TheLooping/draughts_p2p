@@ -20,6 +20,8 @@ struct Config {
     std::string peer_info_dir;
     std::string identity_key_file;
     std::string topology_dir;
+    std::string topod_ipc_socket;
+    uint32_t topod_timeout_ms = 1500;
 
     // Static topology degree expectations
     size_t active_min = 4;

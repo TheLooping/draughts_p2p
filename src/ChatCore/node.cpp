@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -145,7 +146,13 @@ bool DraughtsNode::start() {
     logger_.info("node start peer_id=" + self_.peer_id + " bind=" + peer_to_string(self_));
 
     write_self_info_file();
-    if (!load_static_topology()) return false;
+    if (!load_peer_directory()) {
+        logger_.warn("peer directory preload failed or empty: " + cfg_.peer_info_dir);
+    }
+    if (!load_static_topology()) {
+        if (cfg_.topod_ipc_socket.empty()) return false;
+        logger_.warn("static topology unavailable; continue with TopoDaemon mode");
+    }
     update_active_neighbors_file(true);
     tick_housekeeping();
     return true;
@@ -442,6 +449,36 @@ void DraughtsNode::remove_self_info_file() {
     if (cfg_.self_info_file.empty()) return;
 }
 
+bool DraughtsNode::load_peer_directory() {
+    if (cfg_.peer_info_dir.empty()) return false;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::exists(cfg_.peer_info_dir, ec) || !fs::is_directory(cfg_.peer_info_dir, ec)) {
+        return false;
+    }
+
+    std::size_t loaded = 0;
+    for (const auto& entry : fs::directory_iterator(cfg_.peer_info_dir)) {
+        if (!entry.is_regular_file()) continue;
+        PeerInfoFile info;
+        if (!load_peer_info_file(entry.path().string(), info)) continue;
+        boost::system::error_code ec_addr;
+        auto addr = address_v4::from_string(info.bind_ip, ec_addr);
+        if (ec_addr) continue;
+        proto::PeerDescriptor d;
+        d.peer_id = info.peer_id;
+        d.ip = bytes_from_addr(addr);
+        d.overlay_port = info.overlay_port;
+        d.draughts_port = info.draughts_port;
+        d.pubkey = info.pubkey;
+        learn_peer(d);
+        ++loaded;
+    }
+    logger_.info("peer directory preloaded: files=" + std::to_string(loaded) +
+                 " known=" + std::to_string(directory_.size()));
+    return loaded > 0;
+}
+
 bool DraughtsNode::load_static_topology() {
     if (cfg_.topology_dir.empty()) {
         logger_.error("topology_dir is empty");
@@ -463,6 +500,7 @@ bool DraughtsNode::load_static_topology() {
     }
 
     active_neighbors_.clear();
+    twohop_.clear();
     std::unordered_set<std::string> seen;
     for (const auto& peer_id : neighbor_ids) {
         if (peer_id == self_.peer_id) continue;

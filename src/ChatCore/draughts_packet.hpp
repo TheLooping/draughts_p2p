@@ -11,7 +11,7 @@ static constexpr std::size_t kPacketSize = 1280;
 static constexpr std::size_t kPkSize = 64;
 static constexpr std::size_t kAddrSize = 6; // IPv4 (4) + port (2)
 static constexpr std::size_t kSessionIdSize = 16;
-static constexpr std::size_t kDataSize = 1038;
+static constexpr std::size_t kDataSize = 1030;
 
 #pragma pack(push, 1)
 struct DraughtsParams {
@@ -20,6 +20,7 @@ struct DraughtsParams {
     std::uint8_t addr_nnh[kAddrSize];
     std::uint8_t c_addr_real_receiver[kAddrSize];
     std::uint8_t c_addr_real_sender[kAddrSize];
+    std::uint64_t topo_term;
     double x;
     std::uint64_t magic_num;
 };
@@ -32,7 +33,7 @@ struct DraughtsPacket {
 };
 #pragma pack(pop)
 
-static_assert(sizeof(DraughtsParams) == 162, "DraughtsParams size mismatch");
+static_assert(sizeof(DraughtsParams) == 170, "DraughtsParams size mismatch");
 static_assert(sizeof(DraughtsPacket) == kPacketSize, "DraughtsPacket size mismatch");
 
 inline bool is_exit_pk(const std::uint8_t pk[kPkSize]) {

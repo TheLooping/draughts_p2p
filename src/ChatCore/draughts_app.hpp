@@ -18,6 +18,7 @@
 #include "draughts_packet.hpp"
 #include "logger.hpp"
 #include "node.hpp"
+#include "topod_client.hpp"
 
 class DraughtsApp {
 public:
@@ -65,6 +66,7 @@ private:
         boost::asio::ip::address_v4 addr_nnh;
         uint16_t port_nnh = 0;
         std::array<std::uint8_t, draughts::kAddrSize> c_addr_real_sender{};
+        std::uint64_t topo_term = 0;
         uint64_t created_ms = 0;
     };
 
@@ -117,9 +119,11 @@ private:
                      boost::asio::ip::address_v4& nnh_addr,
                      uint16_t& nnh_port,
                      draughts::crypto::PubKey& nnh_pub,
+                     std::uint64_t& topo_term,
                      const std::string& exclude_peer_id);
     bool pick_nnh_for_peer_id(const std::string& nh_peer_id,
                               const std::string& exclude_peer_id,
+                              std::uint64_t topo_term,
                               boost::asio::ip::address_v4& nnh_addr,
                               uint16_t& nnh_port,
                               draughts::crypto::PubKey& nnh_pub,
@@ -179,6 +183,7 @@ private:
     std::vector<InboxItem> inbox_;
 
     Ciplc ciplc_;
+    TopodClient topod_;
 
     boost::asio::steady_timer t_housekeeping_;
     mutable std::mt19937 rng_{std::random_device{}()};

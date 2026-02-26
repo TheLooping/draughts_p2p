@@ -58,6 +58,8 @@ bool load_config(const std::string& path, Config& out, std::string& err) {
             else if (key == "peer_info_dir") out.peer_info_dir = val;
             else if (key == "identity_key_file") out.identity_key_file = val;
             else if (key == "topology_dir") out.topology_dir = val;
+            else if (key == "topod_ipc_socket") out.topod_ipc_socket = val;
+            else if (key == "topod_timeout_ms") out.topod_timeout_ms = static_cast<uint32_t>(std::stoul(val));
 
             else if (key == "active_min") out.active_min = static_cast<size_t>(std::stoul(val));
             else if (key == "active_max") out.active_max = static_cast<size_t>(std::stoul(val));

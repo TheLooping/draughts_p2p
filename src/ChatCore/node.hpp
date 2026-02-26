@@ -53,6 +53,7 @@ private:
     void remove_active_neighbors_file();
     void write_self_info_file();
     void remove_self_info_file();
+    bool load_peer_directory();
     bool load_static_topology();
 
     // Peer knowledge / lookup
