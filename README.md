@@ -52,6 +52,12 @@ cd ..
 - CMake 会生成 `./build/draughts_node`，并复制一份到 `./build/ChatCore`。
 - 推荐统一使用 `./build/ChatCore` 作为 C++ 主进程启动文件。
 
+执行顺序说明：
+
+- **首次部署**：先执行本节“构建”，再执行“配置生成”，最后执行“Ubuntu 22.04（64 核）实验命令”。
+- **重复跑实验**：若代码未变更，可跳过“构建”，直接清理并重新生成配置后启动。
+- `./scripts/clean_experiment.sh` 会删除实验生成物（`run/`、`logs/`、`neighbors/`、`peers/`、`keys/`、`topology/`、`config/generated/`、`config/topod/` 等），**不会删除 `build/` 里的已编译二进制**。
+
 ## 配置生成
 
 使用脚本统一生成：
@@ -75,7 +81,6 @@ cd ..
 ### 1. 清理旧状态
 
 ```bash
-cd /home/wkw/draughts_p2p
 ./scripts/clean_experiment.sh
 ```
 
@@ -197,4 +202,3 @@ ADDR_NNH(6) | C_ADDR_Real_Receiver(6) | C_ADDR_Real_Sender(6) |
 topo_term(8) | x(8) | magic(8) |
 session_id(16) | C_Data(1030)
 ```
-

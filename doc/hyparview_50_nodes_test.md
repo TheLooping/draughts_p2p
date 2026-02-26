@@ -3,9 +3,13 @@
 ## 1. 环境准备与清理
 
 ```bash
-cd /home/wkw/draughts_p2p
 ./scripts/clean_experiment.sh
 ```
+
+说明：
+
+- 以上命令均默认在项目根目录执行（当前目录就是仓库目录）。
+- `clean_experiment.sh` 会删除实验生成状态与配置目录（如 `run/`、`config/generated/`、`config/topod/` 等），不会删除 `build/` 下已编译程序。
 
 ## 2. 编译 ChatCore 与 TopoDaemon
 
