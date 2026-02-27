@@ -1703,6 +1703,8 @@ func (d *daemon) processIPC(line string) string {
 	switch cmd {
 	case "STATE":
 		return d.handleIPCState()
+	case "TWOHOP":
+		return d.handleIPCTwoHop()
 	case "PLAN":
 		return d.handleIPCPlan(strings.TrimSpace(kv["exclude"]))
 	case "HISTORY", "PICK":
@@ -1762,6 +1764,60 @@ func (d *daemon) handleIPCState() string {
 	sort.Strings(activeIDs)
 	tdInfof("IPC 调用", "STATE result [term=%d] [neighbors=%s]", term, formatNodeSet(activeIDs))
 	return fmt.Sprintf("OK term=%d active=%s", term, strings.Join(activeIDs, ","))
+}
+
+func (d *daemon) handleIPCTwoHop() string {
+	type latestSnapshot struct {
+		owner string
+		snap  NeighborSnapshot
+		ok    bool
+	}
+
+	d.mu.RLock()
+	term := d.term
+	selfID := d.self.PeerID
+	activeIDs := make([]string, 0, len(d.active))
+	latest := make(map[string]latestSnapshot, len(d.active))
+	for peerID := range d.active {
+		activeIDs = append(activeIDs, peerID)
+		if ring := d.neighborHistory[peerID]; ring != nil {
+			if snap, ok := ring.Latest(); ok {
+				latest[peerID] = latestSnapshot{owner: peerID, snap: snap, ok: true}
+				continue
+			}
+		}
+		latest[peerID] = latestSnapshot{owner: peerID, ok: false}
+	}
+	d.mu.RUnlock()
+
+	sort.Strings(activeIDs)
+	parts := make([]string, 0, len(activeIDs))
+	for _, owner := range activeIDs {
+		rec, ok := latest[owner]
+		if !ok || !rec.ok {
+			parts = append(parts, owner+">")
+			continue
+		}
+
+		seen := make(map[string]struct{}, len(rec.snap.Active))
+		nnhIDs := make([]string, 0, len(rec.snap.Active))
+		for _, p := range rec.snap.Active {
+			pid := strings.TrimSpace(p.PeerID)
+			if pid == "" || pid == selfID || pid == owner {
+				continue
+			}
+			if _, dup := seen[pid]; dup {
+				continue
+			}
+			seen[pid] = struct{}{}
+			nnhIDs = append(nnhIDs, pid)
+		}
+		sort.Strings(nnhIDs)
+		parts = append(parts, owner+">"+strings.Join(nnhIDs, ","))
+	}
+
+	tdInfof("IPC 调用", "TWOHOP result [term=%d] [active=%s] [owners=%d]", term, formatNodeSet(activeIDs), len(activeIDs))
+	return fmt.Sprintf("OK term=%d active=%s twohop=%s", term, strings.Join(activeIDs, ","), strings.Join(parts, ";"))
 }
 
 func (d *daemon) handleIPCPlan(exclude string) string {

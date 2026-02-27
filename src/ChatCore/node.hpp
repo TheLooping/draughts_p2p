@@ -55,6 +55,7 @@ private:
     // Timers
     void tick_housekeeping();
     bool sync_active_neighbors_from_topod();
+    bool sync_twohop_from_topod();
     void prune_twohop_cache();
     void update_active_neighbors_file(bool force);
     void remove_active_neighbors_file();

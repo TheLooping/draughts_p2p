@@ -197,6 +197,10 @@ void DraughtsNode::cmd_show_neighbors() {
 }
 
 void DraughtsNode::cmd_show_twohop() {
+    sync_active_neighbors_from_topod();
+    // Refresh from TopoDaemon on demand so CLI reflects runtime view even before first send.
+    sync_twohop_from_topod();
+
     console_.println("Two-hop cache entries: " + std::to_string(twohop_.size()));
     if (twohop_.empty()) {
         console_.println("  (empty)");
@@ -450,6 +454,53 @@ bool DraughtsNode::sync_active_neighbors_from_topod() {
                      " active=" + std::to_string(active_neighbors_.size()));
     }
     prune_twohop_cache();
+    return true;
+}
+
+bool DraughtsNode::sync_twohop_from_topod() {
+    if (!topod_.enabled()) return false;
+
+    TopodClient::TwoHopView view{};
+    if (!topod_.query_twohop(view)) return false;
+
+    std::unordered_map<std::string, TwoHopEntry> next;
+    next.reserve(view.active_peer_ids.size());
+
+    for (const auto& nh_peer_id : view.active_peer_ids) {
+        if (nh_peer_id.empty()) continue;
+        if (nh_peer_id == self_.peer_id) continue;
+        if (!is_active_neighbor(nh_peer_id)) continue;
+
+        std::vector<proto::PeerDescriptor> nnh_descs;
+        auto it_nnh = view.twohop_peer_ids.find(nh_peer_id);
+        if (it_nnh != view.twohop_peer_ids.end()) {
+            std::unordered_set<std::string> seen;
+            for (const auto& nnh_peer_id : it_nnh->second) {
+                if (nnh_peer_id.empty()) continue;
+                if (nnh_peer_id == self_.peer_id || nnh_peer_id == nh_peer_id) continue;
+                if (!seen.insert(nnh_peer_id).second) continue;
+
+                proto::PeerDescriptor d{};
+                auto it_desc = directory_.find(nnh_peer_id);
+                if (it_desc != directory_.end()) {
+                    d = it_desc->second;
+                } else if (load_peer_descriptor(nnh_peer_id, cfg_.peer_info_dir, d)) {
+                    learn_peer(d);
+                } else {
+                    d.peer_id = nnh_peer_id;
+                }
+                nnh_descs.push_back(std::move(d));
+            }
+            std::sort(nnh_descs.begin(), nnh_descs.end(), [](const auto& a, const auto& b) {
+                return a.peer_id < b.peer_id;
+            });
+        }
+
+        next.emplace(nh_peer_id, TwoHopEntry{std::move(nnh_descs)});
+    }
+
+    twohop_ = std::move(next);
+    if (view.term > 0) topod_term_ = view.term;
     return true;
 }
 

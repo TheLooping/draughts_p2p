@@ -31,6 +31,12 @@ public:
         std::vector<std::string> active_peer_ids;
     };
 
+    struct TwoHopView {
+        std::uint64_t term = 0;
+        std::vector<std::string> active_peer_ids;
+        std::unordered_map<std::string, std::vector<std::string>> twohop_peer_ids;
+    };
+
     TopodClient(const Config& cfg, Logger& logger);
 
     bool enabled() const;
@@ -42,6 +48,7 @@ public:
                           bool strict,
                           HopInfo& out) const;
     bool query_state(StateView& out) const;
+    bool query_twohop(TwoHopView& out) const;
 
 private:
     bool exchange(const std::string& request, std::string& response) const;

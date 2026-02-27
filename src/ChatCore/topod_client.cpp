@@ -156,6 +156,62 @@ bool TopodClient::query_state(StateView& out) const {
     return true;
 }
 
+bool TopodClient::query_twohop(TwoHopView& out) const {
+    if (!enabled()) return false;
+
+    std::string resp;
+    if (!exchange("TWOHOP", resp)) return false;
+
+    std::string status;
+    std::unordered_map<std::string, std::string> kv;
+    if (!parse_line(resp, status, kv)) {
+        logger_.warn("topod TWOHOP 响应解析失败: " + resp);
+        return false;
+    }
+    if (status != "OK") {
+        logger_.warn("topod TWOHOP failed: " + resp);
+        return false;
+    }
+
+    auto it_term = kv.find("term");
+    auto it_active = kv.find("active");
+    if (it_term == kv.end() || it_active == kv.end()) return false;
+
+    std::uint64_t term = 0;
+    try {
+        term = static_cast<std::uint64_t>(std::stoull(it_term->second));
+    } catch (...) {
+        return false;
+    }
+
+    TwoHopView view{};
+    view.term = term;
+    view.active_peer_ids = split_csv(it_active->second);
+    for (const auto& nh : view.active_peer_ids) {
+        if (nh.empty()) continue;
+        view.twohop_peer_ids.emplace(nh, std::vector<std::string>{});
+    }
+
+    auto it_twohop = kv.find("twohop");
+    if (it_twohop != kv.end() && !it_twohop->second.empty()) {
+        std::istringstream entries(it_twohop->second);
+        std::string token;
+        while (std::getline(entries, token, ';')) {
+            token = trim(token);
+            if (token.empty()) continue;
+            auto pos = token.find('>');
+            if (pos == std::string::npos) continue;
+            std::string nh = trim(token.substr(0, pos));
+            std::string nnh_csv = token.substr(pos + 1);
+            if (nh.empty()) continue;
+            view.twohop_peer_ids[nh] = split_csv(nnh_csv);
+        }
+    }
+
+    out = std::move(view);
+    return true;
+}
+
 bool TopodClient::exchange(const std::string& request, std::string& response) const {
     if (!enabled()) return false;
     auto start = std::chrono::steady_clock::now();
