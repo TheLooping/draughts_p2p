@@ -73,6 +73,15 @@ bool load_peer_info_file(const std::string& path, PeerInfoFile& out) {
     return !out.peer_id.empty() && !out.bind_ip.empty() && out.draughts_port != 0 && !out.pubkey.empty();
 }
 
+void log_nh_nnh(Logger& logger,
+                const std::string& nh_label,
+                const std::string& nnh_label,
+                const std::string& stage) {
+    std::string msg = "下一跳是" + nh_label + "，选择下下跳，结果是" + nnh_label;
+    if (!stage.empty()) msg += " stage=" + stage;
+    logger.info(msg);
+}
+
 } // namespace
 
 DraughtsApp::ResponderLru::ResponderLru(size_t capacity) : capacity_(capacity) {}
@@ -317,6 +326,7 @@ void DraughtsApp::cmd_reply(const std::string& session_hex_in, const std::string
         logger_.warn("cli reply failed: missing nnh address");
         return;
     }
+    const std::string sid_hex = session_hex(sid);
 
     draughts::DraughtsPacket p{};
     draughts::fill_exit_pk(p.pk_ph_tmp);
@@ -343,15 +353,19 @@ void DraughtsApp::cmd_reply(const std::string& session_hex_in, const std::string
     std::memcpy(p.c_data, pt, draughts::kDataSize);
     crypto::CommutativeCipher::TransformInPlace(p.c_data, draughts::kDataSize, key_iv.first, key_iv.second);
 
+    log_nh_nnh(logger_,
+               peer_label_for(value.addr_ph, value.port_ph),
+               peer_label_for(value.addr_nnh, value.port_nnh),
+               "cli_reply");
+
     if (!send_packet_to(p, value.addr_ph, value.port_ph)) {
         console_.println("failed to send reply to out node");
-        logger_.warn("cli reply failed session=" + session_hex(sid));
+        logger_.warn("cli reply failed");
         return;
     }
 
-    logger_.info("cli send reply session=" + session_hex(sid) +
-                 " outnode=" + endpoint_to_string(value.addr_ph, value.port_ph));
-    console_.println("sent reply session=" + session_hex(sid) + " to out node");
+    logger_.info("cli send reply outnode=" + endpoint_to_string(value.addr_ph, value.port_ph));
+    console_.println("sent reply session=" + sid_hex + " to out node");
 }
 
 // ------------------- UDP receive -------------------
@@ -379,7 +393,7 @@ void DraughtsApp::on_datagram(const std::array<uint8_t, draughts::kPacketSize>& 
                               const udp::endpoint& from) {
     draughts::DraughtsPacket p{};
     std::memcpy(&p, bytes.data(), draughts::kPacketSize);
-    logger_.info("recv packet from " + peer_label_for(from.address().to_v4(), from.port()));
+    logger_.info("收到数据包 from=" + peer_label_for(from.address().to_v4(), from.port()));
 
     if (draughts::is_exit_pk(p.pk_ph_tmp)) {
         handle_exit_packet(p, from);
@@ -395,6 +409,7 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
     }
 
     std::string sid = session_id_from_bytes(p.session_id);
+    const std::string sid_hex = session_hex(sid);
     double x = p.params.x;
 
     if (approx_eq(x, -1.0)) {
@@ -411,9 +426,10 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
                 return;
             }
 
-            logger_.info("recv reply session=" + session_hex(sid));
-            inbox_.push_back(InboxItem{true, session_hex(sid), text, ""});
-            console_.println("[REPLY] session=" + session_hex(sid) + " text=\"" + text + "\"");
+            logger_.info("recv reply");
+            inbox_.push_back(InboxItem{true, sid_hex, text, ""});
+            logger_.info("交付给cli type=reply");
+            console_.println("[REPLY] session=" + sid_hex + " text=\"" + text + "\"");
             it->second.last_used_ms = now_ms();
             return;
         }
@@ -441,8 +457,7 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
             return;
         }
 
-        logger_.info("recv request session=" + session_hex(sid) +
-                     " from=" + endpoint_to_string(from.address().to_v4(), from.port()));
+        logger_.info("recv request from=" + endpoint_to_string(from.address().to_v4(), from.port()));
         ResponderValue value{};
         value.addr_ph = from.address().to_v4();
         value.port_ph = from.port();
@@ -457,8 +472,9 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
         value.created_ms = now_ms();
         responder_lru_.insert_head(sid, value);
 
-        inbox_.push_back(InboxItem{false, session_hex(sid), text, endpoint_to_string(from.address().to_v4(), from.port())});
-        console_.println("[REQUEST] session=" + session_hex(sid) + " from=" + endpoint_to_string(from.address().to_v4(), from.port())
+        inbox_.push_back(InboxItem{false, sid_hex, text, endpoint_to_string(from.address().to_v4(), from.port())});
+        logger_.info("交付给cli type=request");
+        console_.println("[REQUEST] session=" + sid_hex + " from=" + endpoint_to_string(from.address().to_v4(), from.port())
                          + " text=\"" + text + "\"");
         return;
     }
@@ -491,6 +507,10 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
             logger_.warn("failed to pick nnh from nh neighbors for response bootstrap");
             return;
         }
+        log_nh_nnh(logger_,
+                   peer_label_for(nh_addr, nh_port),
+                   peer_label_for(nnh_addr, nnh_port),
+                   "response_bootstrap");
 
         draughts::crypto::Sm2KeyPair ph_tmp;
         auto ph_pub = ph_tmp.public_key_raw();
@@ -502,7 +522,8 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
             return;
         }
 
-        p.params.x = std::fabs(cfg_.ciplc_x0);
+        // Mark first response relay hop as deterministic-continue bootstrap.
+        p.params.x = -std::fabs(cfg_.ciplc_x0);
         addr_to_bytes(nnh_addr, nnh_port, p.params.addr_nnh);
 
         if (!encrypt_params_for_next_hop(p, nh_pub, ph_tmp)) {
@@ -527,7 +548,6 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
         return;
     }
 
-    std::string sid = session_id_from_bytes(p.session_id);
     bool response_flow = draughts::is_zero_addr(p.params.c_addr_real_sender);
     bool response_first_hop = response_flow && (p.params.x < 0.0);
     auto from_desc = node_.lookup_peer_by_draughts_endpoint(from.address().to_v4(), from.port());
@@ -566,6 +586,10 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
             logger_.warn("responder port missing at outnode");
             return;
         }
+        log_nh_nnh(logger_,
+                   peer_label_for(responder_addr, responder_port),
+                   "直连交付",
+                   "outnode_deliver");
 
         std::memcpy(p.params.pk_pph_tmp, p.pk_ph_tmp, draughts::kPkSize);
         p.params.x = -1.0;
@@ -587,6 +611,7 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     }
 
     bool do_continue = false;
+    bool request_initial_stage = false;
     if (response_flow) {
         do_continue = response_first_hop;
         if (response_first_hop) {
@@ -595,8 +620,11 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     } else {
         Ciplc ciplc = ciplc_;
         ciplc.x = p.params.x;
-        do_continue = can_continue && ciplc.step_and_decide(rng_);
+        request_initial_stage = approx_eq(p.params.x, cfg_.ciplc_x0);
+        bool mapped_continue = ciplc.step_and_decide(rng_);
         p.params.x = ciplc.x;
+        // Initial request stage always continues path expansion while still updating x.
+        do_continue = can_continue && (request_initial_stage || mapped_continue);
     }
 
     std::string exclude_peer_id;
@@ -622,6 +650,12 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
         }
         auto nnh_desc = node_.lookup_peer_by_draughts_endpoint(nnh_addr, nnh_port);
         std::string nnh_peer_id = nnh_desc ? nnh_desc->peer_id : "";
+        (void)nnh_peer_id;
+
+        log_nh_nnh(logger_,
+                   peer_label_for(nh_addr, nh_port),
+                   peer_label_for(nnh_addr, nnh_port),
+                   response_flow ? "response_continue" : "request_continue");
 
         if (is_zero_pk_bytes(p.params.pk_pph_tmp) || draughts::is_exit_pk(p.params.pk_pph_tmp)) {
             logger_.warn("invalid pk_pph_tmp for relay");
@@ -673,19 +707,8 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
         }
     }
     if (!outnode_ok) {
-        auto nh_desc = node_.pick_random_active_except(exclude_peer_id);
-        if (!nh_desc) {
-            logger_.warn("no neighbors to pick outnode");
-            return;
-        }
-        outnode_addr = addr_from_bytes(nh_desc->ip);
-        outnode_port = nh_desc->draughts_port;
-        if (!get_peer_pubkey_by_endpoint(outnode_addr, outnode_port, outnode_pub)) {
-            logger_.warn("outnode pubkey not found");
-            return;
-        }
-        outnode_peer_id = nh_desc->peer_id;
-        outnode_ok = true;
+        logger_.warn("outnode selection failed from addr_nnh; dropping");
+        return;
     }
     if (outnode_port == 0) {
         logger_.warn("outnode port missing");
@@ -701,6 +724,11 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
             return;
         }
     }
+
+    log_nh_nnh(logger_,
+               peer_label_for(outnode_addr, outnode_port),
+               response_flow ? "无需下下跳" : peer_label_for(nnh_addr, nnh_port),
+               response_flow ? "response_outnode" : "request_outnode");
 
     std::array<uint8_t, draughts::kPkSize> prev_ph{};
     std::memcpy(prev_ph.data(), p.pk_ph_tmp, draughts::kPkSize);
@@ -775,7 +803,7 @@ bool DraughtsApp::send_packet_to(const draughts::DraughtsPacket& p,
     udp::endpoint ep(addr, port);
     auto buf = std::make_shared<std::array<uint8_t, draughts::kPacketSize>>();
     std::memcpy(buf->data(), &p, draughts::kPacketSize);
-    logger_.info("send packet to " + peer_label_for(addr, port));
+    logger_.info("转发数据包给" + peer_label_for(addr, port));
     sock_.async_send_to(boost::asio::buffer(*buf), ep, [buf](auto, auto) {});
     return true;
 }
@@ -801,89 +829,51 @@ bool DraughtsApp::pick_nh_nnh(address_v4& nh_addr,
                               address_v4& nnh_addr,
                               uint16_t& nnh_port,
                               draughts::crypto::PubKey& nnh_pub,
-                              std::uint64_t& topo_term,
-                              const std::string& exclude_peer_id) {
+    std::uint64_t& topo_term,
+    const std::string& exclude_peer_id) {
     topo_term = 0;
-    if (topod_.enabled()) {
-        TopodClient::RoutePlan plan{};
-        if (topod_.pick_route(exclude_peer_id, plan)) {
-            nh_addr = plan.nh.addr;
-            nh_port = plan.nh.port;
-            nh_pub = plan.nh.pubkey;
-            nnh_addr = plan.nnh.addr;
-            nnh_port = plan.nnh.port;
-            nnh_pub = plan.nnh.pubkey;
-            topo_term = plan.term;
-            return true;
-        }
+    if (!topod_.enabled()) {
+        logger_.warn("topod disabled; static topology compatibility is removed");
+        return false;
+    }
+    TopodClient::RoutePlan plan{};
+    if (!topod_.pick_route(exclude_peer_id, plan)) {
         logger_.warn("topod PLAN query failed");
         return false;
     }
-
-    auto nh_desc = node_.pick_random_active_except(exclude_peer_id);
-    if (!nh_desc) return false;
-    nh_addr = addr_from_bytes(nh_desc->ip);
-    nh_port = nh_desc->draughts_port;
-    if (nh_port == 0) return false;
-
-    if (!get_peer_pubkey_by_endpoint(nh_addr, nh_port, nh_pub)) return false;
-
-    return pick_nnh_for_peer_id(nh_desc->peer_id, exclude_peer_id, topo_term, nnh_addr, nnh_port, nnh_pub);
+    nh_addr = plan.nh.addr;
+    nh_port = plan.nh.port;
+    nh_pub = plan.nh.pubkey;
+    nnh_addr = plan.nnh.addr;
+    nnh_port = plan.nnh.port;
+    nnh_pub = plan.nnh.pubkey;
+    topo_term = plan.term;
+    return true;
 }
 
 bool DraughtsApp::pick_nnh_for_peer_id(const std::string& nh_peer_id,
                                        const std::string& exclude_peer_id,
-                                       std::uint64_t topo_term,
-                                       address_v4& nnh_addr,
-                                       uint16_t& nnh_port,
-                                       draughts::crypto::PubKey& nnh_pub,
-                                       bool strict_from_nh_neighbors) {
-    if (topod_.enabled()) {
-        if (nh_peer_id.empty() || topo_term == 0) {
-            return false;
-        }
-        TopodClient::HopInfo nnh{};
-        if (topod_.pick_history_nnh(nh_peer_id, topo_term, exclude_peer_id, strict_from_nh_neighbors, nnh)) {
-            nnh_addr = nnh.addr;
-            nnh_port = nnh.port;
-            nnh_pub = nnh.pubkey;
-            return true;
-        }
+    std::uint64_t topo_term,
+    address_v4& nnh_addr,
+    uint16_t& nnh_port,
+    draughts::crypto::PubKey& nnh_pub,
+    bool strict_from_nh_neighbors) {
+    if (!topod_.enabled()) {
+        logger_.warn("topod disabled; cannot pick history nnh");
         return false;
     }
-
-    bool nnh_ok = false;
-    if (!nh_peer_id.empty()) {
-        auto nnh_id = node_.pick_nnh_for(nh_peer_id, exclude_peer_id, strict_from_nh_neighbors);
-        if (nnh_id) {
-            auto nnh_desc = node_.lookup_peer(*nnh_id);
-            if (nnh_desc) {
-                nnh_addr = addr_from_bytes(nnh_desc->ip);
-                nnh_port = nnh_desc->draughts_port;
-                nnh_ok = (nnh_port != 0);
-            }
-        }
+    if (nh_peer_id.empty() || topo_term == 0) {
+        logger_.warn("invalid inputs for topod HISTORY nnh pick");
+        return false;
     }
-
-    if (!nnh_ok && !strict_from_nh_neighbors) {
-        auto act = node_.active_neighbors();
-        std::vector<proto::PeerDescriptor> candidates;
-        for (const auto& d : act) {
-            if (!nh_peer_id.empty() && d.peer_id == nh_peer_id) continue;
-            if (!exclude_peer_id.empty() && d.peer_id == exclude_peer_id) continue;
-            candidates.push_back(d);
-        }
-        if (!candidates.empty()) {
-            std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
-            auto pick = candidates[dist(rng_)];
-            nnh_addr = addr_from_bytes(pick.ip);
-            nnh_port = pick.draughts_port;
-            nnh_ok = (nnh_port != 0);
-        }
+    TopodClient::HopInfo nnh{};
+    if (!topod_.pick_history_nnh(nh_peer_id, topo_term, exclude_peer_id, strict_from_nh_neighbors, nnh)) {
+        logger_.warn("topod HISTORY nnh query failed");
+        return false;
     }
-
-    if (!nnh_ok) return false;
-    if (!get_peer_pubkey_by_endpoint(nnh_addr, nnh_port, nnh_pub)) return false;
+    nnh_addr = nnh.addr;
+    nnh_port = nnh.port;
+    nnh_pub = nnh.pubkey;
     return true;
 }
 
@@ -1110,6 +1100,8 @@ bool DraughtsApp::send_request_with_session(const std::string& sid,
         return false;
     }
 
+    const std::string sid_hex = session_hex(sid);
+
     draughts::DraughtsPacket p{};
     std::memcpy(p.session_id, sid.data(), draughts::kSessionIdSize);
 
@@ -1159,19 +1151,22 @@ bool DraughtsApp::send_request_with_session(const std::string& sid,
         return false;
     }
 
-    logger_.info("cli send request session=" + session_hex(sid) +
-                 " responder=" + endpoint_to_string(session.resp_addr, session.resp_port) +
+    logger_.info("cli send request responder=" + endpoint_to_string(session.resp_addr, session.resp_port) +
                  " nh=" + endpoint_to_string(nh_addr, nh_port) +
                  " nnh=" + endpoint_to_string(nnh_addr, nnh_port));
+    log_nh_nnh(logger_,
+               peer_label_for(nh_addr, nh_port),
+               peer_label_for(nnh_addr, nnh_port),
+               "cli_request");
 
     if (!send_packet_to(p, nh_addr, nh_port)) {
         console_.println("failed to send packet to next hop");
-        logger_.warn("cli send failed session=" + session_hex(sid));
+        logger_.warn("cli send failed");
         return false;
     }
 
     session.last_used_ms = now_ms();
-    console_.println("sent session=" + session_hex(sid) +
+    console_.println("sent session=" + sid_hex +
                      " to responder=" + endpoint_to_string(session.resp_addr, session.resp_port));
     return true;
 }

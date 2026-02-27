@@ -37,6 +37,8 @@ public:
     std::optional<proto::PeerDescriptor> lookup_peer_by_ipv4(const boost::asio::ip::address_v4& addr) const;
     std::optional<proto::PeerDescriptor> lookup_peer_by_draughts_endpoint(const boost::asio::ip::address_v4& addr,
                                                                           uint16_t port) const;
+    bool is_active_neighbor(const std::string& peer_id) const;
+    bool is_twohop_neighbor(const std::string& nh_peer_id, const std::string& nnh_peer_id) const;
     std::optional<proto::PeerDescriptor> pick_random_active_except(const std::string& exclude_peer_id) const;
     std::optional<std::string> pick_nnh_for(const std::string& nh_peer_id,
                                            const std::string& exclude_peer_id,

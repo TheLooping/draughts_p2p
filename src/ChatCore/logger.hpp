@@ -26,10 +26,19 @@ public:
     void warn(const std::string& msg);
     void error(const std::string& msg);
 
+    void debug(const std::string& tag, const std::string& msg);
+    void info(const std::string& tag, const std::string& msg);
+    void warn(const std::string& tag, const std::string& msg);
+    void error(const std::string& tag, const std::string& msg);
+
 private:
     void log(LogLevel lvl, const std::string& msg);
+    void log(LogLevel lvl, const std::string& tag, const std::string& msg);
     static std::string ts();
-    static const char* level_str(LogLevel lvl);
+    static const char* level_en(LogLevel lvl);
+    static const char* level_cn(LogLevel lvl);
+    static std::string infer_tag(const std::string& msg);
+    static std::string normalize_tag(const std::string& tag);
 
     std::mutex mu_;
     std::ofstream out_;

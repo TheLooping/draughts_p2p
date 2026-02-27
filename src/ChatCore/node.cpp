@@ -147,12 +147,16 @@ bool DraughtsNode::start() {
 
     write_self_info_file();
     if (!load_peer_directory()) {
-        logger_.warn("peer directory preload failed or empty: " + cfg_.peer_info_dir);
+        logger_.error("peer directory preload failed or empty: " + cfg_.peer_info_dir);
+        return false;
     }
-    if (!load_static_topology()) {
-        if (cfg_.topod_ipc_socket.empty()) return false;
-        logger_.warn("static topology unavailable; continue with TopoDaemon mode");
+    if (cfg_.topod_ipc_socket.empty()) {
+        logger_.error("topod_ipc_socket is empty; static topology compatibility is disabled");
+        return false;
     }
+    active_neighbors_.clear();
+    twohop_.clear();
+    logger_.info("static topology compatibility disabled; routing depends on TopoDaemon PLAN/HISTORY");
     update_active_neighbors_file(true);
     tick_housekeeping();
     return true;
@@ -276,6 +280,24 @@ std::optional<proto::PeerDescriptor> DraughtsNode::lookup_peer_by_draughts_endpo
     return pit->second;
 }
 
+bool DraughtsNode::is_active_neighbor(const std::string& peer_id) const {
+    if (peer_id.empty()) return false;
+    for (const auto& d : active_neighbors_) {
+        if (d.peer_id == peer_id) return true;
+    }
+    return false;
+}
+
+bool DraughtsNode::is_twohop_neighbor(const std::string& nh_peer_id, const std::string& nnh_peer_id) const {
+    if (nh_peer_id.empty() || nnh_peer_id.empty()) return false;
+    auto it = twohop_.find(nh_peer_id);
+    if (it == twohop_.end()) return false;
+    for (const auto& d : it->second.neighbors) {
+        if (d.peer_id == nnh_peer_id) return true;
+    }
+    return false;
+}
+
 // ------------------- Helpers -------------------
 
 void DraughtsNode::learn_peer(const proto::PeerDescriptor& d) {
@@ -367,6 +389,21 @@ void DraughtsNode::update_active_neighbors_file(bool force) {
                 logger_.info("active neighbor removed: " + k);
             }
         }
+
+        std::vector<std::string> peers;
+        peers.reserve(act.size());
+        for (const auto& d : act) peers.push_back(d.peer_id);
+        std::sort(peers.begin(), peers.end());
+
+        std::ostringstream oss;
+        oss << "{";
+        for (size_t i = 0; i < peers.size(); ++i) {
+            if (i > 0) oss << ",";
+            oss << peers[i];
+        }
+        oss << "}";
+        logger_.info("active邻居变更 " + oss.str());
+
         active_neighbor_set_ = std::move(current);
     }
 
