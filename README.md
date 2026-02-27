@@ -1,37 +1,38 @@
-# draughts_p2p（Hyparview 双进程版）
+# draughts_p2p
 
-本分支将系统拆分为两个进程：
+`draughts_p2p` 是一个 C++/Go 混合实现的 P2P 请求-响应原型系统：
 
-- `ChatCore`（C++）：匿名路由与业务报文核心。
-- `TopoDaemon`（Go）：基于 Hyparview 的动态拓扑维护、版本号（term）与历史快照查询。
+- C++ `draughts_node`（ChatCore）负责数据包处理、匿名转发、加密封装、CLI 交互。
+- Go `TopoDaemon` 负责 HyParView 风格邻居维护、邻居历史快照、本地路由决策（PLAN/HISTORY/STATE）。
 
-## 项目结构
+当前实现以“邻居与局部拓扑维护层（TopoDaemon）+ 报文与业务执行层（ChatCore）”分层协作为核心：
 
-```text
-src/
-  ChatCore/                        # C++ 主进程
-    main.cpp
-    draughts_app.cpp/.hpp
-    draughts_packet.hpp
-    topod_client.cpp/.hpp
-    ...
-  TopoDaemon/                      # Go 拓扑守护进程
-    main.go
-    go.mod
-    third_party/
-      hyparview/                   # 引入的 Hyparview 库源码
+- 邻居与局部拓扑维护层给出 `(NH, NNH, term)` 路由建议。
+- 报文与业务执行层按 `DraughtsPacket` 固定包结构执行随机游走、出网节点投递、请求-回复回程。
+
+## 1. 仓库结构
+
+- `src/ChatCore/`：C++ 主程序、协议包、加密、CLI。
+- `src/TopoDaemon/`：Go 拓扑守护进程（overlay + 本地 IPC）。
+- `scripts/`：构建、配置生成、批量起停、清理脚本。
+- `config/generated/`：ChatCore 配置（由 `gen_configs.py` 生成）。
+- `config/topod/`：TopoDaemon 配置（由 `gen_configs.py` 生成）。
+- `peers/`、`keys/`、`run/`、`logs/`：运行时产物目录。
+- `exp/`：实验指导文档（你已将实验文档迁移到这里）。
+
+## 2. 依赖
+
+Ubuntu 常用依赖：
+
+```bash
+./scripts/install_deps.sh
 ```
 
-## 构建
+此外需要 Go（`src/TopoDaemon/go.mod` 目前是 `go 1.22`）。
 
-依赖：
+## 3. 编译
 
-- C++17 编译器
-- CMake 3.16+
-- OpenSSL（libcrypto）
-- Go 1.22+（用于构建 TopoDaemon）
-
-构建 `ChatCore`：
+构建 ChatCore（C++）：
 
 ```bash
 mkdir -p build
@@ -41,7 +42,7 @@ cmake --build . -j
 cd ..
 ```
 
-构建 `TopoDaemon`：
+构建 TopoDaemon（Go）：
 
 ```bash
 ./scripts/build_topod.sh ./build/TopoDaemon
@@ -49,156 +50,104 @@ cd ..
 
 说明：
 
-- CMake 会生成 `./build/draughts_node`，并复制一份到 `./build/ChatCore`。
-- 推荐统一使用 `./build/ChatCore` 作为 C++ 主进程启动文件。
+- CMake 目标名为 `draughts_node`。
+- 构建后会额外复制一份到 `build/ChatCore`（便于旧脚本/命令兼容）。
 
-执行顺序说明：
+## 4. 快速实验（推荐 10 节点：8 中继 + 2 CLI）
 
-- **首次部署**：先执行本节“构建”，再执行“配置生成”，最后执行“Ubuntu 22.04（64 核）实验命令”。
-- **重复跑实验**：若代码未变更，可跳过“构建”，直接清理并重新生成配置后启动。
-- `./scripts/clean_experiment.sh` 会删除实验生成物（`run/`、`logs/`、`neighbors/`、`peers/`、`keys/`、`topology/`、`config/generated/`、`config/topod/` 等），**不会删除 `build/` 里的已编译二进制**。
+完整步骤见：
 
-## 配置生成
+- `exp/hyparview_10_nodes_cli_request_reply_test.md`
 
-使用脚本统一生成：
-
-- `config/generated/*.conf`（ChatCore 配置）
-- `config/topod/*.json`（TopoDaemon 配置）
-- `peers/*.info`（节点信息）
-- `keys/*.pem`/`*.pub`（密钥）
-- `topology/*.neighbors`（实验初始拓扑）
-
-核心脚本：
-
-```bash
-./scripts/gen_configs.py --help
-```
-
-## Ubuntu 22.04（64 核）实验命令：50 中继 + 2 CLI 节点加入
-
-以下命令按顺序执行。
-
-### 1. 清理旧状态
+典型流程（根目录执行）：
 
 ```bash
 ./scripts/clean_experiment.sh
-```
 
-### 2. 编译
-
-```bash
-mkdir -p build
-cd build
-cmake ..
-cmake --build . -j
-cd ..
-./scripts/build_topod.sh ./build/TopoDaemon
-```
-
-### 3. 初始化本次实验（生成 52 节点配置，其中 node51/node52 为 CLI）
-
-```bash
 ./scripts/gen_configs.py \
-  --count 52 \
-  --cli-nodes 51,52 \
+  --count 10 \
+  --cli-nodes 9,10 \
   --active-min 3 \
   --active-max 5 \
   --bind-ip 127.0.0.1 \
   --topod-base 6000
-```
 
-### 4. 批量启动 50 个不带 CLI 的节点（node1~node50）
-
-```bash
-ONLY_50=$(seq 1 50 | sed 's/^/node/' | paste -sd, -)
+ONLY_8=$(seq 1 8 | sed 's/^/node/' | paste -sd, -)
 ./scripts/run_hyparview_stack.sh \
-  --chatcore-binary ./build/ChatCore \
-  --topod-binary ./build/TopoDaemon \
-  --only "$ONLY_50" \
+  --only "$ONLY_8" \
   --interval 0.1 \
-  --topod-delay 2
+  --topod-delay 1
 ```
 
-### 5. 单独启动两个带 CLI 的节点并加入网络
-
-终端 A（node51）：
+随后分别开两个终端启动 `node9`、`node10`（CLI 节点）：
 
 ```bash
-( exec -a TopoDaemon ./build/TopoDaemon config/topod/node51.json ) > run/node51.topod.out 2>&1 &
-exec -a ChatCore ./build/ChatCore config/generated/node51.conf
+# 终端 A
+( exec -a TopoDaemon ./build/TopoDaemon config/topod/node9.json ) > run/node9.topod.out 2>&1 &
+exec -a ChatCore ./build/ChatCore config/generated/node9.conf
 ```
-
-终端 B（node52）：
 
 ```bash
-( exec -a TopoDaemon ./build/TopoDaemon config/topod/node52.json ) > run/node52.topod.out 2>&1 &
-exec -a ChatCore ./build/ChatCore config/generated/node52.conf
+# 终端 B
+( exec -a TopoDaemon ./build/TopoDaemon config/topod/node10.json ) > run/node10.topod.out 2>&1 &
+exec -a ChatCore ./build/ChatCore config/generated/node10.conf
 ```
 
-### 6. CLI 交互与请求/响应命令
+CLI 验证：
 
-在 node51（终端 A）：
+- 在 `node9`：`send node10 hello`
+- 在 `node10`：`inbox`、`requests`、`reply <session_hex> ack`
+- 回到 `node9`：`inbox`
 
-```text
-id
-neighbors
-send node52 hello-from-node51
-```
+## 5. 运行时接口
 
-在 node52（终端 B）：
+### 5.1 ChatCore CLI
 
-```text
-inbox
-requests
-reply <session_hex> ack-from-node52
-```
+- `id`：节点 ID 与端口信息
+- `neighbors`：当前活跃邻居（来自 TopoDaemon STATE）
+- `peers`：已知节点目录
+- `inbox`：请求/回复收件箱
+- `requests`：待回复会话
+- `send <peer_id|ip:port> <text>`：发请求
+- `send_session <session_hex> <text>`：同会话继续发送
+- `reply <session_hex> <text>`：回复
+- `quit`
 
-回到 node51（终端 A）：
+### 5.2 TopoDaemon IPC（Unix Socket）
 
-```text
-inbox
-```
+`ChatCore` 通过 `topod_ipc_socket` 请求：
 
-### 7. 终止实验
+- `STATE`：返回当前 `term` 与 `active` 邻居列表
+- `PLAN [exclude=peer]`：返回 `term + NH + NNH`
+- `HISTORY peer=<nh> term=<t> [exclude=peer] [strict=0|1]`：按指定 NH 历史快照选 NNH
 
-先在两个 CLI 终端执行：
+## 6. 配置关系（最关键字段）
 
-```text
-quit
-```
+ChatCore（`config/generated/nodeX.conf`）：
 
-然后在任意终端执行：
+- `peer_id`、`bind_ip`、`draughts_port`
+- `peer_info_dir`（读取全网节点描述）
+- `identity_key_file`（EC 私钥）
+- `topod_ipc_socket`（本地 IPC）
+- `ciplc_*`（随机游走概率参数）
+- `magic_num`（包魔数）
 
-```bash
-./scripts/stop_nodes.sh run/hyparview_chatcore.pids
-./scripts/stop_nodes.sh run/hyparview_topod.pids
-./scripts/clean_experiment.sh
-```
+TopoDaemon（`config/topod/nodeX.json`）：
 
-## CLI 命令
+- `peer_id`、`listen_addr`（overlay TCP）
+- `ipc_socket`（给 ChatCore 的 Unix Socket）
+- `peer_info_dir`
+- `active_min`/`active_max`/`passive_max`
+- `bootstrap`（初始可加入目标）
 
-```text
-help
-id
-neighbors
-twohop
-peers
-inbox
-requests
-send <peer_id|ipv4:port> <text>
-send_session <session_hex> <text>
-reply <session_hex> <text>
-quit
-```
+## 7. 其他实验文档（`exp/`）
 
-## Draughts 报文布局（1280 字节）
+- `exp/hyparview_6_nodes_no_cli_debug.md`
+- `exp/hyparview_10_nodes_cli_request_reply_test.md`
+- `exp/hyparview_50_nodes_test.md`
 
-当前 `DraughtsParams` 已包含 `topo_term` 字段，用于历史版本回溯。
+## 8. 深入设计
 
-```text
-PK_PH_tmp(64) |
-PK_PPH_tmp(64) | PK_Init_tmp(64) |
-ADDR_NNH(6) | C_ADDR_Real_Receiver(6) | C_ADDR_Real_Sender(6) |
-topo_term(8) | x(8) | magic(8) |
-session_id(16) | C_Data(1030)
-```
+系统设计、模块交互、数据包结构、请求-响应时序详见：
+
+- `draughts_design.md`
