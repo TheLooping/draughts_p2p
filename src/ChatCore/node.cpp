@@ -300,6 +300,32 @@ bool DraughtsNode::is_twohop_neighbor(const std::string& nh_peer_id, const std::
     return false;
 }
 
+void DraughtsNode::cache_twohop_neighbor(const std::string& nh_peer_id, const std::string& nnh_peer_id) {
+    if (nh_peer_id.empty() || nnh_peer_id.empty()) return;
+    if (nh_peer_id == self_.peer_id || nnh_peer_id == self_.peer_id) return;
+    if (nh_peer_id == nnh_peer_id) return;
+    if (!is_active_neighbor(nh_peer_id)) return;
+
+    auto it_desc = directory_.find(nnh_peer_id);
+    proto::PeerDescriptor nnh_desc{};
+    if (it_desc != directory_.end()) {
+        nnh_desc = it_desc->second;
+    } else if (load_peer_descriptor(nnh_peer_id, cfg_.peer_info_dir, nnh_desc)) {
+        learn_peer(nnh_desc);
+    } else {
+        nnh_desc.peer_id = nnh_peer_id;
+    }
+
+    auto& entry = twohop_[nh_peer_id];
+    for (const auto& d : entry.neighbors) {
+        if (d.peer_id == nnh_peer_id) return;
+    }
+    entry.neighbors.push_back(std::move(nnh_desc));
+    std::sort(entry.neighbors.begin(), entry.neighbors.end(), [](const auto& a, const auto& b) {
+        return a.peer_id < b.peer_id;
+    });
+}
+
 // ------------------- Helpers -------------------
 
 void DraughtsNode::learn_peer(const proto::PeerDescriptor& d) {
@@ -423,7 +449,39 @@ bool DraughtsNode::sync_active_neighbors_from_topod() {
         logger_.info("Topology 同步: term=" + std::to_string(topod_term_) +
                      " active=" + std::to_string(active_neighbors_.size()));
     }
+    prune_twohop_cache();
     return true;
+}
+
+void DraughtsNode::prune_twohop_cache() {
+    std::unordered_set<std::string> active_ids;
+    active_ids.reserve(active_neighbors_.size());
+    for (const auto& d : active_neighbors_) {
+        if (!d.peer_id.empty()) active_ids.insert(d.peer_id);
+    }
+
+    for (auto it = twohop_.begin(); it != twohop_.end();) {
+        if (active_ids.find(it->first) == active_ids.end()) {
+            it = twohop_.erase(it);
+            continue;
+        }
+
+        std::vector<proto::PeerDescriptor> next;
+        next.reserve(it->second.neighbors.size());
+        std::unordered_set<std::string> seen;
+        for (const auto& d : it->second.neighbors) {
+            if (d.peer_id.empty()) continue;
+            if (d.peer_id == self_.peer_id) continue;
+            if (d.peer_id == it->first) continue;
+            if (!seen.insert(d.peer_id).second) continue;
+            next.push_back(d);
+        }
+        std::sort(next.begin(), next.end(), [](const auto& a, const auto& b) {
+            return a.peer_id < b.peer_id;
+        });
+        it->second.neighbors = std::move(next);
+        ++it;
+    }
 }
 
 void DraughtsNode::update_active_neighbors_file(bool force) {

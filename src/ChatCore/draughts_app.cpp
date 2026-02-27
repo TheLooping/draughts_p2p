@@ -1009,6 +1009,7 @@ bool DraughtsApp::pick_nh_nnh(address_v4& nh_addr,
     nnh_port = plan.nnh.port;
     nnh_pub = plan.nnh.pubkey;
     topo_term = plan.term;
+    node_.cache_twohop_neighbor(plan.nh.peer_id, plan.nnh.peer_id);
     return true;
 }
 
@@ -1045,6 +1046,7 @@ bool DraughtsApp::pick_nnh_for_peer_id(const std::string& nh_peer_id,
     nnh_addr = nnh.addr;
     nnh_port = nnh.port;
     nnh_pub = nnh.pubkey;
+    node_.cache_twohop_neighbor(nh_peer_id, nnh.peer_id);
     return true;
 }
 

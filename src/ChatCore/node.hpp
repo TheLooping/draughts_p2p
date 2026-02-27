@@ -31,6 +31,7 @@ public:
     void cmd_show_neighbors();
     void cmd_show_twohop();
     void cmd_show_peers();
+    void cache_twohop_neighbor(const std::string& nh_peer_id, const std::string& nnh_peer_id);
 
     // Overlay info for draughts app
     std::vector<proto::PeerDescriptor> all_peers() const;
@@ -54,6 +55,7 @@ private:
     // Timers
     void tick_housekeeping();
     bool sync_active_neighbors_from_topod();
+    void prune_twohop_cache();
     void update_active_neighbors_file(bool force);
     void remove_active_neighbors_file();
     void write_self_info_file();
@@ -72,7 +74,7 @@ private:
     Logger& logger_;
     Console& console_;
 
-    // Active neighbors (static topology)
+    // Active neighbors (TopoDaemon STATE)
     std::vector<proto::PeerDescriptor> active_neighbors_;
 
     // Directories
