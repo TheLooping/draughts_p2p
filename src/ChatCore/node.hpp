@@ -1,6 +1,7 @@
 #pragma once
 
 #include <boost/asio.hpp>
+#include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -12,6 +13,7 @@
 #include "console.hpp"
 #include "logger.hpp"
 #include "protocol.hpp"
+#include "topod_client.hpp"
 
 class DraughtsNode {
 public:
@@ -51,6 +53,7 @@ private:
 
     // Timers
     void tick_housekeeping();
+    bool sync_active_neighbors_from_topod();
     void update_active_neighbors_file(bool force);
     void remove_active_neighbors_file();
     void write_self_info_file();
@@ -81,6 +84,8 @@ private:
 
     // Timers
     boost::asio::steady_timer t_housekeeping_;
+    TopodClient topod_;
+    std::uint64_t topod_term_ = 0;
 
     // RNG
     mutable std::mt19937 rng_{std::random_device{}()};

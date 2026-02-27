@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "config.hpp"
 #include "crypto/Crypto.h"
@@ -25,6 +26,11 @@ public:
         HopInfo nnh;
     };
 
+    struct StateView {
+        std::uint64_t term = 0;
+        std::vector<std::string> active_peer_ids;
+    };
+
     TopodClient(const Config& cfg, Logger& logger);
 
     bool enabled() const;
@@ -35,6 +41,7 @@ public:
                           const std::string& exclude_peer_id,
                           bool strict,
                           HopInfo& out) const;
+    bool query_state(StateView& out) const;
 
 private:
     bool exchange(const std::string& request, std::string& response) const;

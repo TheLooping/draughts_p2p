@@ -43,21 +43,6 @@ const (
 	tdError tdLevel = "ERROR"
 )
 
-func tdLevelCN(level tdLevel) string {
-	switch level {
-	case tdDebug:
-		return "调试"
-	case tdInfo:
-		return "信息"
-	case tdWarn:
-		return "警告"
-	case tdError:
-		return "错误"
-	default:
-		return "未知"
-	}
-}
-
 func tdTs() string {
 	return time.Now().Format("2006-01-02 15:04:05.000")
 }
@@ -65,10 +50,17 @@ func tdTs() string {
 func tdLogf(level tdLevel, tag, format string, args ...any) {
 	tag = strings.TrimSpace(tag)
 	if tag == "" {
-		tag = "General 通用"
+		tag = "General"
+	}
+	if idx := strings.IndexAny(tag, " \t"); idx >= 0 {
+		tag = tag[:idx]
+	}
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		tag = "General"
 	}
 	msg := fmt.Sprintf(format, args...)
-	log.Printf("%s [%s %s] [%s] %s", tdTs(), string(level), tdLevelCN(level), tag, msg)
+	log.Printf("%s [%s] [%s] %s", tdTs(), string(level), tag, msg)
 }
 
 func tdInfof(tag, format string, args ...any) {

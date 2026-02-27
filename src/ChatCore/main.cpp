@@ -23,6 +23,7 @@ void usage(const char* argv0) {
 }
 
 LogLevel parse_level(const std::string& s) {
+    if (s == "detail") return LogLevel::DETAIL;
     if (s == "debug") return LogLevel::DEBUG;
     if (s == "info") return LogLevel::INFO;
     if (s == "warn") return LogLevel::WARN;

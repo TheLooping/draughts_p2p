@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <sstream>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -24,6 +25,24 @@ std::string trim(const std::string& s) {
     std::size_t e = s.size();
     while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
     return s.substr(b, e - b);
+}
+
+std::vector<std::string> split_csv(const std::string& s) {
+    std::vector<std::string> out;
+    std::string token;
+    std::unordered_set<std::string> seen;
+    for (char c : s) {
+        if (c == ',') {
+            token = trim(token);
+            if (!token.empty() && seen.insert(token).second) out.push_back(token);
+            token.clear();
+            continue;
+        }
+        token.push_back(c);
+    }
+    token = trim(token);
+    if (!token.empty() && seen.insert(token).second) out.push_back(token);
+    return out;
 }
 
 } // namespace
@@ -100,6 +119,41 @@ bool TopodClient::pick_history_nnh(const std::string& nh_peer_id,
         return false;
     }
     return parse_hop(kv, "nnh", out);
+}
+
+bool TopodClient::query_state(StateView& out) const {
+    if (!enabled()) return false;
+
+    std::string resp;
+    if (!exchange("STATE", resp)) return false;
+
+    std::string status;
+    std::unordered_map<std::string, std::string> kv;
+    if (!parse_line(resp, status, kv)) {
+        logger_.warn("topod STATE 响应解析失败: " + resp);
+        return false;
+    }
+    if (status != "OK") {
+        logger_.warn("topod STATE failed: " + resp);
+        return false;
+    }
+
+    auto it_term = kv.find("term");
+    auto it_active = kv.find("active");
+    if (it_term == kv.end() || it_active == kv.end()) return false;
+
+    std::uint64_t term = 0;
+    try {
+        term = static_cast<std::uint64_t>(std::stoull(it_term->second));
+    } catch (...) {
+        return false;
+    }
+
+    StateView st{};
+    st.term = term;
+    st.active_peer_ids = split_csv(it_active->second);
+    out = std::move(st);
+    return true;
 }
 
 bool TopodClient::exchange(const std::string& request, std::string& response) const {

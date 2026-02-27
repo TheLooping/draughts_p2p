@@ -19,11 +19,13 @@ void Logger::set_level(LogLevel lvl) {
     level_ = lvl;
 }
 
+void Logger::detail(const std::string& msg) { log(LogLevel::DETAIL, msg); }
 void Logger::debug(const std::string& msg) { log(LogLevel::DEBUG, msg); }
 void Logger::info(const std::string& msg) { log(LogLevel::INFO, msg); }
 void Logger::warn(const std::string& msg) { log(LogLevel::WARN, msg); }
 void Logger::error(const std::string& msg) { log(LogLevel::ERROR, msg); }
 
+void Logger::detail(const std::string& tag, const std::string& msg) { log(LogLevel::DETAIL, tag, msg); }
 void Logger::debug(const std::string& tag, const std::string& msg) { log(LogLevel::DEBUG, tag, msg); }
 void Logger::info(const std::string& tag, const std::string& msg) { log(LogLevel::INFO, tag, msg); }
 void Logger::warn(const std::string& tag, const std::string& msg) { log(LogLevel::WARN, tag, msg); }
@@ -31,6 +33,7 @@ void Logger::error(const std::string& tag, const std::string& msg) { log(LogLeve
 
 const char* Logger::level_en(LogLevel lvl) {
     switch (lvl) {
+        case LogLevel::DETAIL: return "DETAIL";
         case LogLevel::DEBUG: return "DEBUG";
         case LogLevel::INFO:  return "INFO";
         case LogLevel::WARN:  return "WARN";
@@ -39,21 +42,16 @@ const char* Logger::level_en(LogLevel lvl) {
     }
 }
 
-const char* Logger::level_cn(LogLevel lvl) {
-    switch (lvl) {
-        case LogLevel::DEBUG: return "调试";
-        case LogLevel::INFO:  return "信息";
-        case LogLevel::WARN:  return "警告";
-        case LogLevel::ERROR: return "错误";
-        default: return "未知";
-    }
-}
-
 std::string Logger::normalize_tag(const std::string& tag) {
     std::string out = tag;
     while (!out.empty() && std::isspace(static_cast<unsigned char>(out.front()))) out.erase(out.begin());
     while (!out.empty() && std::isspace(static_cast<unsigned char>(out.back()))) out.pop_back();
-    if (out.empty()) return "General 通用";
+    if (out.empty()) return "General";
+    std::size_t cut = out.find_first_of(" \t");
+    if (cut != std::string::npos) {
+        out = out.substr(0, cut);
+    }
+    if (out.empty()) return "General";
     return out;
 }
 
@@ -113,7 +111,7 @@ void Logger::log(LogLevel lvl, const std::string& tag, const std::string& msg) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!out_.is_open()) return;
     out_ << ts()
-         << " [" << level_en(lvl) << " " << level_cn(lvl) << "]"
+         << " [" << level_en(lvl) << "]"
          << " [" << normalize_tag(tag) << "] "
          << msg << "\n";
     out_.flush();

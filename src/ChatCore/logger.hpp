@@ -5,10 +5,11 @@
 #include <string>
 
 enum class LogLevel {
-    DEBUG = 0,
-    INFO = 1,
-    WARN = 2,
-    ERROR = 3
+    DETAIL = 0,
+    DEBUG = 1,
+    INFO = 2,
+    WARN = 3,
+    ERROR = 4
 };
 
 // Simple thread-safe file logger.
@@ -25,18 +26,19 @@ public:
     void info(const std::string& msg);
     void warn(const std::string& msg);
     void error(const std::string& msg);
+    void detail(const std::string& msg);
 
     void debug(const std::string& tag, const std::string& msg);
     void info(const std::string& tag, const std::string& msg);
     void warn(const std::string& tag, const std::string& msg);
     void error(const std::string& tag, const std::string& msg);
+    void detail(const std::string& tag, const std::string& msg);
 
 private:
     void log(LogLevel lvl, const std::string& msg);
     void log(LogLevel lvl, const std::string& tag, const std::string& msg);
     static std::string ts();
     static const char* level_en(LogLevel lvl);
-    static const char* level_cn(LogLevel lvl);
     static std::string infer_tag(const std::string& msg);
     static std::string normalize_tag(const std::string& tag);
 

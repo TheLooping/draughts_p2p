@@ -134,7 +134,8 @@ DraughtsNode::DraughtsNode(boost::asio::io_context& io,
       self_(std::move(self)),
       logger_(logger),
       console_(console),
-      t_housekeeping_(io_) {
+      t_housekeeping_(io_),
+      topod_(cfg_, logger_) {
 }
 
 bool DraughtsNode::start() {
@@ -157,6 +158,7 @@ bool DraughtsNode::start() {
     active_neighbors_.clear();
     twohop_.clear();
     logger_.info("static topology compatibility disabled; routing depends on TopoDaemon PLAN/HISTORY");
+    sync_active_neighbors_from_topod();
     update_active_neighbors_file(true);
     tick_housekeeping();
     return true;
@@ -362,9 +364,66 @@ void DraughtsNode::tick_housekeeping() {
     t_housekeeping_.expires_after(std::chrono::milliseconds(1000));
     t_housekeeping_.async_wait([this](boost::system::error_code ec) {
         if (ec) return;
+        sync_active_neighbors_from_topod();
         update_active_neighbors_file(false);
         tick_housekeeping();
     });
+}
+
+bool DraughtsNode::sync_active_neighbors_from_topod() {
+    if (!topod_.enabled()) return false;
+
+    TopodClient::StateView st{};
+    if (!topod_.query_state(st)) return false;
+
+    std::vector<proto::PeerDescriptor> next;
+    next.reserve(st.active_peer_ids.size());
+    std::unordered_set<std::string> seen;
+
+    for (const auto& peer_id : st.active_peer_ids) {
+        if (peer_id.empty()) continue;
+        if (peer_id == self_.peer_id) continue;
+        if (!seen.insert(peer_id).second) continue;
+
+        auto it = directory_.find(peer_id);
+        if (it != directory_.end()) {
+            next.push_back(it->second);
+            continue;
+        }
+
+        proto::PeerDescriptor d;
+        if (!load_peer_descriptor(peer_id, cfg_.peer_info_dir, d)) continue;
+        learn_peer(d);
+        next.push_back(d);
+    }
+
+    std::sort(next.begin(), next.end(), [](const auto& a, const auto& b) {
+        return a.peer_id < b.peer_id;
+    });
+
+    bool changed = false;
+    if (next.size() != active_neighbors_.size()) {
+        changed = true;
+    } else {
+        for (std::size_t i = 0; i < next.size(); ++i) {
+            if (next[i].peer_id != active_neighbors_[i].peer_id ||
+                next[i].draughts_port != active_neighbors_[i].draughts_port ||
+                next[i].overlay_port != active_neighbors_[i].overlay_port ||
+                next[i].ip != active_neighbors_[i].ip ||
+                next[i].pubkey != active_neighbors_[i].pubkey) {
+                changed = true;
+                break;
+            }
+        }
+    }
+
+    topod_term_ = st.term;
+    if (changed) {
+        active_neighbors_ = next;
+        logger_.info("Topology 同步: term=" + std::to_string(topod_term_) +
+                     " active=" + std::to_string(active_neighbors_.size()));
+    }
+    return true;
 }
 
 void DraughtsNode::update_active_neighbors_file(bool force) {
@@ -378,7 +437,7 @@ void DraughtsNode::update_active_neighbors_file(bool force) {
     }
 
     bool changed = (current != active_neighbor_set_);
-    if (force || changed) {
+    if (changed) {
         for (const auto& k : current) {
             if (active_neighbor_set_.find(k) == active_neighbor_set_.end()) {
                 logger_.info("active neighbor added: " + k);
@@ -402,7 +461,7 @@ void DraughtsNode::update_active_neighbors_file(bool force) {
             oss << peers[i];
         }
         oss << "}";
-        logger_.info("active邻居变更 " + oss.str());
+        logger_.info("active邻居变更 term=" + std::to_string(topod_term_) + " " + oss.str());
 
         active_neighbor_set_ = std::move(current);
     }
