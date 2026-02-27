@@ -1,0 +1,15 @@
+{
+  "peer_id": "node7",
+  "listen_addr": "127.0.0.1:6006",
+  "ipc_socket": "run/topod/node7.sock",
+  "peer_info_dir": "peers",
+  "snapshot_limit": 10,
+  "shuffle_interval_ms": 30000,
+  "keepalive_interval_ms": 8000,
+  "join_retry_ms": 1200,
+  "bootstrap": [
+    "127.0.0.1:6000",
+    "127.0.0.1:6001",
+    "127.0.0.1:6002"
+  ]
+}
