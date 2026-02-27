@@ -54,14 +54,18 @@ ONLY_50=$(seq 1 50 | sed 's/^/node/' | paste -sd, -)
 ### 终端 A（node51）
 
 ```bash
+touch run/hyparview_topod.pids
 ( exec -a TopoDaemon ./build/TopoDaemon config/topod/node51.json ) > run/node51.topod.out 2>&1 &
+echo "$! config/topod/node51.json" >> run/hyparview_topod.pids
 exec -a ChatCore ./build/ChatCore config/generated/node51.conf
 ```
 
 ### 终端 B（node52）
 
 ```bash
+touch run/hyparview_topod.pids
 ( exec -a TopoDaemon ./build/TopoDaemon config/topod/node52.json ) > run/node52.topod.out 2>&1 &
+echo "$! config/topod/node52.json" >> run/hyparview_topod.pids
 exec -a ChatCore ./build/ChatCore config/generated/node52.conf
 ```
 

@@ -45,14 +45,18 @@ ONLY_8=$(seq 1 8 | sed 's/^/node/' | paste -sd, -)
 ### 终端 A（node9）
 
 ```bash
+touch run/hyparview_topod.pids
 ( exec -a TopoDaemon ./build/TopoDaemon config/topod/node9.json ) > run/node9.topod.out 2>&1 &
+echo "$! config/topod/node9.json" >> run/hyparview_topod.pids
 exec -a ChatCore ./build/ChatCore config/generated/node9.conf
 ```
 
 ### 终端 B（node10）
 
 ```bash
+touch run/hyparview_topod.pids
 ( exec -a TopoDaemon ./build/TopoDaemon config/topod/node10.json ) > run/node10.topod.out 2>&1 &
+echo "$! config/topod/node10.json" >> run/hyparview_topod.pids
 exec -a ChatCore ./build/ChatCore config/generated/node10.conf
 ```
 

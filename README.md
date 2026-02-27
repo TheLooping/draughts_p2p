@@ -83,13 +83,17 @@ ONLY_8=$(seq 1 8 | sed 's/^/node/' | paste -sd, -)
 
 ```bash
 # 终端 A
+touch run/hyparview_topod.pids
 ( exec -a TopoDaemon ./build/TopoDaemon config/topod/node9.json ) > run/node9.topod.out 2>&1 &
+echo "$! config/topod/node9.json" >> run/hyparview_topod.pids
 exec -a ChatCore ./build/ChatCore config/generated/node9.conf
 ```
 
 ```bash
 # 终端 B
+touch run/hyparview_topod.pids
 ( exec -a TopoDaemon ./build/TopoDaemon config/topod/node10.json ) > run/node10.topod.out 2>&1 &
+echo "$! config/topod/node10.json" >> run/hyparview_topod.pids
 exec -a ChatCore ./build/ChatCore config/generated/node10.conf
 ```
 
