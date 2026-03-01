@@ -32,9 +32,14 @@ public:
     };
 
     struct TwoHopView {
+        struct Snapshot {
+            std::uint64_t term = 0;
+            std::vector<std::string> nnh_peer_ids;
+        };
+
         std::uint64_t term = 0;
         std::vector<std::string> active_peer_ids;
-        std::unordered_map<std::string, std::vector<std::string>> twohop_peer_ids;
+        std::unordered_map<std::string, std::vector<Snapshot>> snapshots_by_owner;
     };
 
     TopodClient(const Config& cfg, Logger& logger);
@@ -42,11 +47,11 @@ public:
     bool enabled() const;
 
     bool pick_route(const std::string& exclude_peer_id, RoutePlan& out) const;
-    bool pick_history_nnh(const std::string& nh_peer_id,
-                          std::uint64_t term,
-                          const std::string& exclude_peer_id,
-                          bool strict,
-                          HopInfo& out) const;
+    bool pick_pick_nnh(const std::string& nh_peer_id,
+                       std::uint64_t term,
+                       const std::string& exclude_peer_id,
+                       std::uint64_t& resolved_term,
+                       HopInfo& out) const;
     bool query_state(StateView& out) const;
     bool query_twohop(TwoHopView& out) const;
 

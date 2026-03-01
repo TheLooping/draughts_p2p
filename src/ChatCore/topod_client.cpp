@@ -3,6 +3,7 @@
 #include "base64.hpp"
 #include "draughts_packet.hpp"
 
+#include <algorithm>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
@@ -43,6 +44,46 @@ std::vector<std::string> split_csv(const std::string& s) {
     token = trim(token);
     if (!token.empty() && seen.insert(token).second) out.push_back(token);
     return out;
+}
+
+std::string to_braced_csv(const std::vector<std::string>& in) {
+    if (in.empty()) return "{}";
+    std::vector<std::string> ids = in;
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    std::ostringstream oss;
+    oss << "{";
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (i > 0) oss << ",";
+        oss << ids[i];
+    }
+    oss << "}";
+    return oss.str();
+}
+
+bool parse_twohop_owner_token(const std::string& token, std::string& owner, std::uint64_t& term) {
+    owner.clear();
+    term = 0;
+    std::string s = trim(token);
+    if (s.empty()) return false;
+
+    auto lb = s.find("(term=");
+    if (lb == std::string::npos) {
+        owner = s;
+        return !owner.empty();
+    }
+    if (lb == 0) return false;
+    owner = trim(s.substr(0, lb));
+    auto rb = s.find(')', lb);
+    if (rb == std::string::npos) return false;
+    auto term_str = trim(s.substr(lb + 6, rb - (lb + 6)));
+    if (term_str.empty()) return false;
+    try {
+        term = static_cast<std::uint64_t>(std::stoull(term_str));
+    } catch (...) {
+        return false;
+    }
+    return !owner.empty();
 }
 
 } // namespace
@@ -92,17 +133,16 @@ bool TopodClient::pick_route(const std::string& exclude_peer_id, RoutePlan& out)
     return true;
 }
 
-bool TopodClient::pick_history_nnh(const std::string& nh_peer_id,
-                                   std::uint64_t term,
-                                   const std::string& exclude_peer_id,
-                                   bool strict,
-                                   HopInfo& out) const {
+bool TopodClient::pick_pick_nnh(const std::string& nh_peer_id,
+                                std::uint64_t term,
+                                const std::string& exclude_peer_id,
+                                std::uint64_t& resolved_term,
+                                HopInfo& out) const {
     if (!enabled()) return false;
     if (nh_peer_id.empty() || term == 0) return false;
 
-    std::string req = "HISTORY peer=" + nh_peer_id + " term=" + std::to_string(term);
+    std::string req = "PICK peer=" + nh_peer_id + " term=" + std::to_string(term);
     if (!exclude_peer_id.empty()) req += " exclude=" + exclude_peer_id;
-    req += std::string(" strict=") + (strict ? "1" : "0");
 
     std::string resp;
     if (!exchange(req, resp)) return false;
@@ -110,15 +150,29 @@ bool TopodClient::pick_history_nnh(const std::string& nh_peer_id,
     std::string status;
     std::unordered_map<std::string, std::string> kv;
     if (!parse_line(resp, status, kv)) {
-        logger_.warn("topod HISTORY 响应解析失败: " + resp);
+        logger_.warn("topod PICK 响应解析失败: " + resp);
         return false;
     }
     if (status == "NOT_FOUND") return false;
     if (status != "OK") {
-        logger_.warn("topod HISTORY failed: " + resp);
+        logger_.warn("topod PICK failed: " + resp);
         return false;
     }
-    return parse_hop(kv, "nnh", out);
+    auto it_term = kv.find("term");
+    if (it_term == kv.end()) return false;
+    std::uint64_t parsed_term = 0;
+    try {
+        parsed_term = static_cast<std::uint64_t>(std::stoull(it_term->second));
+    } catch (...) {
+        return false;
+    }
+    if (!parse_hop(kv, "nnh", out)) return false;
+    resolved_term = parsed_term;
+    logger_.info("topod PICK 结果 nh=" + nh_peer_id +
+                 " req_term=" + std::to_string(term) +
+                 " resolved_term=" + std::to_string(resolved_term) +
+                 " nnh=" + out.peer_id + "@" + out.addr.to_string() + ":" + std::to_string(out.port));
+    return true;
 }
 
 bool TopodClient::query_state(StateView& out) const {
@@ -189,7 +243,7 @@ bool TopodClient::query_twohop(TwoHopView& out) const {
     view.active_peer_ids = split_csv(it_active->second);
     for (const auto& nh : view.active_peer_ids) {
         if (nh.empty()) continue;
-        view.twohop_peer_ids.emplace(nh, std::vector<std::string>{});
+        view.snapshots_by_owner.emplace(nh, std::vector<TwoHopView::Snapshot>{});
     }
 
     auto it_twohop = kv.find("twohop");
@@ -201,12 +255,69 @@ bool TopodClient::query_twohop(TwoHopView& out) const {
             if (token.empty()) continue;
             auto pos = token.find('>');
             if (pos == std::string::npos) continue;
-            std::string nh = trim(token.substr(0, pos));
+            std::string owner_token = token.substr(0, pos);
             std::string nnh_csv = token.substr(pos + 1);
-            if (nh.empty()) continue;
-            view.twohop_peer_ids[nh] = split_csv(nnh_csv);
+            std::string owner;
+            std::uint64_t snap_term = 0;
+            if (!parse_twohop_owner_token(owner_token, owner, snap_term) || owner.empty()) continue;
+
+            TwoHopView::Snapshot snap{};
+            snap.term = snap_term;
+            snap.nnh_peer_ids = split_csv(nnh_csv);
+            view.snapshots_by_owner[owner].push_back(std::move(snap));
         }
     }
+
+    for (auto& item : view.snapshots_by_owner) {
+        auto& snapshots = item.second;
+        std::sort(snapshots.begin(), snapshots.end(), [](const auto& a, const auto& b) {
+            if (a.term == b.term) {
+                return a.nnh_peer_ids.size() < b.nnh_peer_ids.size();
+            }
+            return a.term < b.term;
+        });
+        if (snapshots.empty()) {
+            continue;
+        }
+        std::vector<TwoHopView::Snapshot> deduped;
+        deduped.reserve(snapshots.size());
+        for (const auto& snap : snapshots) {
+            if (!deduped.empty() &&
+                deduped.back().term == snap.term &&
+                deduped.back().nnh_peer_ids == snap.nnh_peer_ids) {
+                continue;
+            }
+            deduped.push_back(snap);
+        }
+        snapshots = std::move(deduped);
+    }
+
+    std::vector<std::string> owners;
+    owners.reserve(view.snapshots_by_owner.size());
+    for (const auto& item : view.snapshots_by_owner) {
+        owners.push_back(item.first);
+    }
+    std::sort(owners.begin(), owners.end());
+
+    std::ostringstream twohop_oss;
+    twohop_oss << "{";
+    for (size_t i = 0; i < owners.size(); ++i) {
+        if (i > 0) twohop_oss << ";";
+        const auto& owner = owners[i];
+        const auto& snaps = view.snapshots_by_owner[owner];
+        if (snaps.empty()) {
+            twohop_oss << owner << "(term=0)>{}";
+            continue;
+        }
+        for (size_t j = 0; j < snaps.size(); ++j) {
+            if (j > 0) twohop_oss << ";";
+            twohop_oss << owner << "(term=" << snaps[j].term << ")>" << to_braced_csv(snaps[j].nnh_peer_ids);
+        }
+    }
+    twohop_oss << "}";
+    logger_.info("topod TWOHOP 结果 term=" + std::to_string(view.term) +
+                 " active=" + to_braced_csv(view.active_peer_ids) +
+                 " twohop=" + twohop_oss.str());
 
     out = std::move(view);
     return true;

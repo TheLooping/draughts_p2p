@@ -48,7 +48,13 @@ public:
                                            bool strict_twohop = false) const;
 
 private:
+    struct TwoHopSnapshot {
+        std::uint64_t term = 0;
+        std::vector<proto::PeerDescriptor> neighbors;
+    };
+
     struct TwoHopEntry {
+        std::vector<TwoHopSnapshot> snapshots;
         std::vector<proto::PeerDescriptor> neighbors;
     };
 

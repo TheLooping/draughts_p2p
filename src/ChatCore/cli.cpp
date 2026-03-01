@@ -92,8 +92,8 @@ static bool read_line(Console& c, std::string& out) {
 
 } // namespace
 
-Cli::Cli(boost::asio::io_context& io, DraughtsNode& node, DraughtsApp& app, Console& console)
-    : io_(io), node_(node), app_(app), console_(console) {}
+Cli::Cli(boost::asio::io_context& io, DraughtsNode& node, DraughtsApp& app, Console& console, Logger& logger)
+    : io_(io), node_(node), app_(app), console_(console), logger_(logger) {}
 
 void Cli::start() {
     th_ = std::thread([this]{ run(); });
@@ -112,6 +112,7 @@ void Cli::run() {
         if (!read_line(console_, line)) break;
         line = trim_ws(line);
         if (line.empty()) continue;
+        logger_.info("cli input raw=\"" + line + "\"");
 
         std::istringstream iss(line);
         std::string cmd;

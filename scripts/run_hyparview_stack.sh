@@ -11,6 +11,16 @@ ONLY_LIST=""
 INTERVAL=1
 TOPOD_DELAY=2
 
+spawn_detached() {
+  local out="$1"
+  shift
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$@" > "$out" 2>&1 < /dev/null &
+  else
+    "$@" > "$out" 2>&1 &
+  fi
+}
+
 usage() {
   cat <<EOF2
 Usage: $0 [--configs-dir DIR] [--topod-config-dir DIR] [--chatcore-binary PATH] [--topod-binary PATH] [--run-dir DIR] [--skip name1,name2] [--only name1,name2] [--interval SEC] [--topod-delay SEC]
@@ -114,7 +124,7 @@ start_topod() {
     exit 1
   fi
   local out="$RUN_DIR/$name.topod.out"
-  ( exec -a TopoDaemon "$TOPOD_BINARY" "$topod_cfg" ) > "$out" 2>&1 &
+  spawn_detached "$out" "$TOPOD_BINARY" "$topod_cfg"
   echo "$! $topod_cfg" >> "$TOPOD_PID_FILE"
   echo "started TopoDaemon $name (pid=$!)"
 }
@@ -124,7 +134,7 @@ start_chatcore() {
   local name
   name=$(basename "$cfg" .conf)
   local out="$RUN_DIR/$name.chatcore.out"
-  ( exec -a ChatCore "$CHATCORE_BINARY" "$cfg" ) > "$out" 2>&1 &
+  spawn_detached "$out" "$CHATCORE_BINARY" "$cfg"
   echo "$! $cfg" >> "$CHATCORE_PID_FILE"
   echo "$! $cfg" >> "$LEGACY_PID_FILE"
   echo "started ChatCore $name (pid=$!)"

@@ -103,7 +103,7 @@ int main(int argc, char** argv) {
 
     std::unique_ptr<Cli> cli;
     if (cfg.cli_enabled) {
-        cli = std::make_unique<Cli>(io, node, app, console);
+        cli = std::make_unique<Cli>(io, node, app, console, logger);
         cli->start();
     }
 

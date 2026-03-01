@@ -35,6 +35,14 @@ bool is_zero_pk_bytes(const std::uint8_t pk[draughts::kPkSize]) {
     return true;
 }
 
+bool is_all_zero_hex(const std::string& s) {
+    if (s.empty()) return false;
+    for (char c : s) {
+        if (c != '0') return false;
+    }
+    return true;
+}
+
 bool transform_addr_layer(std::uint8_t addr[draughts::kAddrSize],
                           const draughts::crypto::Sm2KeyPair& self_key,
                           const draughts::crypto::PubKey& peer_pub) {
@@ -77,9 +85,9 @@ void log_nh_nnh(Logger& logger,
                 const std::string& nh_label,
                 const std::string& nnh_label,
                 const std::string& stage) {
-    std::string msg = "下一跳是" + nh_label + "，选择下下跳，结果是" + nnh_label;
-    if (!stage.empty()) msg += " stage=" + stage;
-    logger.info(msg);
+    std::string suffix;
+    if (!stage.empty()) suffix = " stage=" + stage;
+    logger.info("根据下一跳" + nh_label + "选择下下跳为" + nnh_label + suffix);
 }
 
 std::string hex_bytes(const std::uint8_t* data, std::size_t len) {
@@ -92,8 +100,18 @@ std::string hex_bytes(const std::uint8_t* data, std::size_t len) {
     return oss.str();
 }
 
+std::string bytes_header_hex(const std::uint8_t* data, std::size_t len, std::size_t n = 8) {
+    n = std::min<std::size_t>(n, len);
+    return "0x" + hex_bytes(data, n);
+}
+
 std::string addr_field_hex(const std::uint8_t addr[draughts::kAddrSize]) {
     return "0x" + hex_bytes(addr, draughts::kAddrSize);
+}
+
+std::string pk_field_head(const std::uint8_t pk[draughts::kPkSize], std::size_t n = 8) {
+    n = std::min<std::size_t>(n, draughts::kPkSize);
+    return "0x" + hex_bytes(pk, n);
 }
 
 std::string pubkey_head(const draughts::crypto::PubKey& pk, std::size_t n = 8) {
@@ -101,18 +119,105 @@ std::string pubkey_head(const draughts::crypto::PubKey& pk, std::size_t n = 8) {
     return "0x" + hex_bytes(pk.data(), n);
 }
 
-void log_addr_transform_detail(Logger& logger,
-                              const std::string& stage,
-                              const std::string& field,
-                              const std::string& op,
-                              const std::string& key_desc,
-                              const std::uint8_t before[draughts::kAddrSize],
-                              const std::uint8_t after[draughts::kAddrSize]) {
+std::string addr_field_readable(const std::uint8_t addr[draughts::kAddrSize]) {
+    if (draughts::is_zero_addr(addr)) return addr_field_hex(addr) + "(0.0.0.0:0)";
+    boost::asio::ip::address_v4::bytes_type ip_bytes{};
+    std::memcpy(ip_bytes.data(), addr, 4);
+    auto ip = boost::asio::ip::address_v4(ip_bytes).to_string();
+    auto port = (static_cast<uint16_t>(addr[4]) << 8) | static_cast<uint16_t>(addr[5]);
+    return addr_field_hex(addr) + "(" + ip + ":" + std::to_string(port) + ")";
+}
+
+std::string session_hex_from_packet(const draughts::DraughtsPacket& p) {
+    return hex_bytes(p.session_id, draughts::kSessionIdSize);
+}
+
+void log_packet_construct(Logger& logger,
+                          const std::string& stage,
+                          const std::string& session_hex,
+                          const std::string& flow) {
+    logger.info("构造数据包 stage=" + stage + " flow=" + flow + " session=" + session_hex);
+}
+
+void log_packet_field_set(Logger& logger,
+                          const std::string& stage,
+                          const std::string& field,
+                          const std::string& value) {
+    logger.detail("Field 细节",
+                  "stage=" + stage + " packet_field=" + field + " set_value=" + value);
+}
+
+void log_packet_snapshot(Logger& logger,
+                         const std::string& stage,
+                         const draughts::DraughtsPacket& p) {
+    logger.detail("Packet 细节",
+                  "stage=" + stage +
+                  " session=" + session_hex_from_packet(p) +
+                  " pk_ph_tmp_head=" + pk_field_head(p.pk_ph_tmp) +
+                  " pk_pph_tmp_head=" + pk_field_head(p.params.pk_pph_tmp) +
+                  " pk_init_tmp_head=" + pk_field_head(p.params.pk_init_tmp) +
+                  " addr_nnh=" + addr_field_readable(p.params.addr_nnh) +
+                  " c_addr_real_receiver=" + addr_field_readable(p.params.c_addr_real_receiver) +
+                  " c_addr_real_sender=" + addr_field_readable(p.params.c_addr_real_sender) +
+                  " topo_term=" + std::to_string(p.params.topo_term) +
+                  " x=" + std::to_string(p.params.x) +
+                  " magic=0x" + hex_bytes(reinterpret_cast<const std::uint8_t*>(&p.params.magic_num),
+                                          sizeof(p.params.magic_num)));
+}
+
+void log_packet_cipher_snapshot(Logger& logger,
+                                const std::string& stage,
+                                const draughts::DraughtsPacket& p) {
+    auto* params_bytes = reinterpret_cast<const std::uint8_t*>(&p.params);
+    logger.detail("Packet 细节",
+                  "stage=" + stage +
+                  " session=" + session_hex_from_packet(p) +
+                  " pk_ph_tmp_head=" + pk_field_head(p.pk_ph_tmp) +
+                  " params_cipher_head=0x" + hex_bytes(params_bytes, 12) +
+                  " c_data_head=0x" + hex_bytes(p.c_data, 12));
+}
+
+void log_crypto_key_usage(Logger& logger,
+                          const std::string& stage,
+                          const std::string& field,
+                          const std::string& op,
+                          const std::string& self_key_desc,
+                          const std::string& peer_key_desc,
+                          const std::string& before_header,
+                          const std::string& after_header) {
+    // Address transform logs must be emitted only by log_addr_transform_detail
+    // to avoid duplicate lines for the same operation.
+    if (field.rfind("c_addr_real_", 0) == 0) return;
+    std::string action = "变换";
+    if (op.find("encrypt") != std::string::npos) action = "加密";
+    if (op.find("decrypt") != std::string::npos) action = "解密";
     logger.detail("Crypto 细节",
                   "stage=" + stage +
                   " field=" + field +
                   " op=" + op +
-                  " key=" + key_desc +
+                  " 基于[" + self_key_desc + "]和[" + peer_key_desc + "] 执行" + action +
+                  " before_header=" + before_header +
+                  " after_header=" + after_header);
+}
+
+void log_addr_transform_detail(Logger& logger,
+                              const std::string& stage,
+                              const std::string& field,
+                              const std::string& op,
+                              const std::string& self_key_desc,
+                              const std::string& peer_key_desc,
+                              const std::string& key_desc,
+                              const std::uint8_t before[draughts::kAddrSize],
+                              const std::uint8_t after[draughts::kAddrSize]) {
+    (void)key_desc;
+    std::string action = "变换";
+    if (op.find("encrypt") != std::string::npos) action = "加密";
+    if (op.find("decrypt") != std::string::npos) action = "解密";
+    logger.detail("Crypto 细节",
+                  "stage=" + stage +
+                  " field=" + field +
+                  " op=" + op +
+                  " 基于[" + self_key_desc + "]和[" + peer_key_desc + "] 执行" + action +
                   " before=" + addr_field_hex(before) +
                   " after=" + addr_field_hex(after));
 }
@@ -263,6 +368,9 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
         logger_.warn("cli send failed: responder not found dest=" + dest);
         return;
     }
+    logger_.info("收到CLI发起通信请求 dest=" + dest +
+                 " responder=" + peer_label_for(resp_addr, resp_port) +
+                 " responder_pub_head=" + pubkey_head(resp_pub));
 
     // End-to-end init key (per-session) for initiator address + payload.
     draughts::crypto::Sm2KeyPair init_tmp;
@@ -272,6 +380,8 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
         random_session_id(sid_bytes.data());
         sid = session_id_from_bytes(sid_bytes.data());
     } while (initiator_sessions_.count(sid));
+    logger_.detail("Session 细节",
+                   "stage=cli_send_new_session action=generate_session_id sid=" + session_hex(sid));
 
     InitiatorSession session{};
     session.init_key = std::move(init_tmp);
@@ -289,6 +399,11 @@ void DraughtsApp::cmd_send(const std::string& dest, const std::string& text) {
         initiator_session_ids_.erase(sid);
         return;
     }
+    logger_.detail("Session 细节",
+                   "stage=cli_send_new_session action=store sid=" + session_hex(sid) +
+                   " key=session_id value={resp_peer=" + it->second.resp_peer_id +
+                   ",resp_ep=" + endpoint_to_string(it->second.resp_addr, it->second.resp_port) +
+                   ",resp_pub_head=" + pubkey_head(it->second.resp_pub) + "}");
 
     if (!send_request_with_session(sid, it->second, text)) {
         initiator_session_ids_.erase(sid);
@@ -313,10 +428,32 @@ void DraughtsApp::cmd_send_session(const std::string& session_hex_in, const std:
 
     auto it = initiator_sessions_.find(sid);
     if (it == initiator_sessions_.end()) {
-        console_.println("unknown session id");
-        logger_.warn("cli send_session failed: unknown session id " + session_hex_in);
+        std::vector<std::string> sample_ids;
+        sample_ids.reserve(3);
+        for (const auto& kv : initiator_sessions_) {
+            sample_ids.push_back(session_hex(kv.first));
+            if (sample_ids.size() >= 3) break;
+        }
+        std::sort(sample_ids.begin(), sample_ids.end());
+        std::ostringstream known_oss;
+        known_oss << "{";
+        for (size_t i = 0; i < sample_ids.size(); ++i) {
+            if (i > 0) known_oss << ",";
+            known_oss << sample_ids[i];
+        }
+        known_oss << "}";
+        console_.println("unknown session id; use inbox/requests里的session，或先执行send创建会话");
+        logger_.warn("cli send_session failed: unknown session id " + session_hex_in +
+                     " known_sessions_count=" + std::to_string(initiator_sessions_.size()) +
+                     " known_sessions_sample=" + known_oss.str() +
+                     (is_all_zero_hex(session_hex_in) ? " hint=placeholder_zero_session_id" : ""));
         return;
     }
+    logger_.detail("Session 细节",
+                   "stage=cli_send_session action=get sid=" + session_hex(sid) +
+                   " key=session_id value={resp_peer=" + it->second.resp_peer_id +
+                   ",resp_ep=" + endpoint_to_string(it->second.resp_addr, it->second.resp_port) +
+                   ",resp_pub_head=" + pubkey_head(it->second.resp_pub) + "}");
     initiator_session_ids_.insert(sid);
 
     if (!send_request_with_session(sid, it->second, text)) {
@@ -371,6 +508,13 @@ void DraughtsApp::cmd_reply(const std::string& session_hex_in, const std::string
         logger_.warn("cli reply failed: unknown session id " + session_hex_in);
         return;
     }
+    logger_.detail("Session 细节",
+                   "stage=cli_reply action=get sid=" + session_hex(sid) +
+                   " key=session_id value={addr_ph=" + endpoint_to_string(value.addr_ph, value.port_ph) +
+                   ",addr_nnh=" + endpoint_to_string(value.addr_nnh, value.port_nnh) +
+                   ",pk_pph_tmp_head=" + pubkey_head(value.pk_pph_tmp) +
+                   ",pk_init_tmp_head=" + pubkey_head(value.pk_init_tmp) +
+                   ",topo_term=" + std::to_string(value.topo_term) + "}");
     if (value.addr_nnh.is_unspecified() || value.port_nnh == 0) {
         console_.println("session missing nnh address; cannot reply");
         logger_.warn("cli reply failed: missing nnh address");
@@ -379,11 +523,17 @@ void DraughtsApp::cmd_reply(const std::string& session_hex_in, const std::string
     const std::string sid_hex = session_hex(sid);
 
     draughts::DraughtsPacket p{};
+    log_packet_construct(logger_, "cli_reply_build_response", sid_hex, "response");
     draughts::fill_exit_pk(p.pk_ph_tmp);
+    log_packet_field_set(logger_, "cli_reply_build_response", "pk_ph_tmp", "EXIT_MARK(0xEE)");
     std::memcpy(p.params.pk_pph_tmp, value.pk_pph_tmp.data(), draughts::kPkSize);
+    log_packet_field_set(logger_, "cli_reply_build_response", "params.pk_pph_tmp", pubkey_head(value.pk_pph_tmp));
     std::memcpy(p.params.pk_init_tmp, value.pk_init_tmp.data(), draughts::kPkSize);
+    log_packet_field_set(logger_, "cli_reply_build_response", "params.pk_init_tmp", pubkey_head(value.pk_init_tmp));
     addr_to_bytes(value.addr_nnh, value.port_nnh, p.params.addr_nnh);
+    log_packet_field_set(logger_, "cli_reply_build_response", "params.addr_nnh", addr_field_readable(p.params.addr_nnh));
     std::memcpy(p.params.c_addr_real_sender, value.c_addr_real_sender.data(), draughts::kAddrSize);
+    log_packet_field_set(logger_, "cli_reply_build_response", "params.c_addr_real_sender", addr_field_readable(p.params.c_addr_real_sender));
 
     std::uint8_t sender_before[draughts::kAddrSize]{};
     std::uint8_t receiver_before[draughts::kAddrSize]{};
@@ -400,14 +550,16 @@ void DraughtsApp::cmd_reply(const std::string& session_hex_in, const std::string
                          receiver_before,
                          p.params.c_addr_real_sender,
                          p.params.c_addr_real_receiver);
-    logger_.detail("Crypto 细节",
-                   "stage=cli_reply_build_response key=identity(sk)+pk_init_tmp(head=" + pubkey_head(pk_init) +
-                   ") field=c_data op=encrypt_payload");
-
+    log_packet_field_set(logger_, "cli_reply_build_response", "params.c_addr_real_receiver", addr_field_readable(p.params.c_addr_real_receiver));
+    log_packet_field_set(logger_, "cli_reply_build_response", "params.c_addr_real_sender", addr_field_readable(p.params.c_addr_real_sender));
     p.params.topo_term = value.topo_term;
+    log_packet_field_set(logger_, "cli_reply_build_response", "params.topo_term", std::to_string(value.topo_term));
     p.params.x = -2.0;
+    log_packet_field_set(logger_, "cli_reply_build_response", "params.x", "-2.0");
     p.params.magic_num = cfg_.magic_num;
+    log_packet_field_set(logger_, "cli_reply_build_response", "params.magic_num", "0x" + hex_bytes(reinterpret_cast<const std::uint8_t*>(&cfg_.magic_num), sizeof(cfg_.magic_num)));
     std::memcpy(p.session_id, sid.data(), draughts::kSessionIdSize);
+    log_packet_field_set(logger_, "cli_reply_build_response", "session_id", sid_hex);
 
     std::uint8_t pt[draughts::kDataSize] = {};
     encode_payload(text, pt);
@@ -415,14 +567,26 @@ void DraughtsApp::cmd_reply(const std::string& session_hex_in, const std::string
     auto secret = identity_.DeriveSharedSecret(pk_init);
     auto key_iv = draughts::crypto::Sm2KeyPair::DeriveKeyAndIv(secret);
     std::memcpy(p.c_data, pt, draughts::kDataSize);
+    std::array<std::uint8_t, draughts::kDataSize> c_data_before{};
+    std::memcpy(c_data_before.data(), p.c_data, draughts::kDataSize);
+    log_packet_field_set(logger_, "cli_reply_build_response", "c_data", "plaintext_encoded_then_encrypt");
     crypto::CommutativeCipher::TransformInPlace(p.c_data, draughts::kDataSize, key_iv.first, key_iv.second);
+    log_crypto_key_usage(logger_,
+                         "cli_reply_build_response",
+                         "c_data",
+                         "encrypt_payload",
+                         "响应端长期私钥(identity.sk)",
+                         "发起端临时公钥(pk_init_tmp,head=" + pubkey_head(pk_init) + ")",
+                         bytes_header_hex(c_data_before.data(), c_data_before.size()),
+                         bytes_header_hex(p.c_data, draughts::kDataSize));
+    log_packet_snapshot(logger_, "cli_reply_build_response", p);
 
     log_nh_nnh(logger_,
                peer_label_for(value.addr_ph, value.port_ph),
                peer_label_for(value.addr_nnh, value.port_nnh),
                "cli_reply");
 
-    if (!send_packet_to(p, value.addr_ph, value.port_ph)) {
+    if (!send_packet_to(p, value.addr_ph, value.port_ph, "cli_reply_send")) {
         console_.println("failed to send reply to out node");
         logger_.warn("cli reply failed");
         return;
@@ -457,7 +621,10 @@ void DraughtsApp::on_datagram(const std::array<uint8_t, draughts::kPacketSize>& 
                               const udp::endpoint& from) {
     draughts::DraughtsPacket p{};
     std::memcpy(&p, bytes.data(), draughts::kPacketSize);
-    logger_.info("收到数据包 from=" + peer_label_for(from.address().to_v4(), from.port()));
+    logger_.info("收到数据包 from=" + peer_label_for(from.address().to_v4(), from.port()) +
+                 " session=" + session_hex_from_packet(p) +
+                 " pk_ph_tmp_is_exit=" + std::string(draughts::is_exit_pk(p.pk_ph_tmp) ? "1" : "0"));
+    log_packet_cipher_snapshot(logger_, "on_datagram_raw", p);
 
     if (draughts::is_exit_pk(p.pk_ph_tmp)) {
         handle_exit_packet(p, from);
@@ -475,19 +642,33 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
     std::string sid = session_id_from_bytes(p.session_id);
     const std::string sid_hex = session_hex(sid);
     double x = p.params.x;
+    logger_.info("处理exit包 session=" + sid_hex + " x=" + std::to_string(x) +
+                 " from=" + peer_label_for(from.address().to_v4(), from.port()));
+    log_packet_snapshot(logger_, "handle_exit_packet", p);
 
     if (approx_eq(x, -1.0)) {
         auto it = initiator_sessions_.find(sid);
         if (it != initiator_sessions_.end()) {
+            logger_.detail("Session 细节",
+                           "stage=exit_reply action=get sid=" + sid_hex +
+                           " key=session_id value={resp_peer=" + it->second.resp_peer_id +
+                           ",resp_ep=" + endpoint_to_string(it->second.resp_addr, it->second.resp_port) +
+                           ",resp_pub_head=" + pubkey_head(it->second.resp_pub) + "}");
             std::string text;
             std::array<std::uint8_t, draughts::kDataSize> tmp{};
             std::memcpy(tmp.data(), p.c_data, draughts::kDataSize);
+            auto tmp_before = tmp;
             auto secret = it->second.init_key.DeriveSharedSecret(it->second.resp_pub);
             auto key_iv = draughts::crypto::Sm2KeyPair::DeriveKeyAndIv(secret);
             crypto::CommutativeCipher::TransformInPlace(tmp.data(), draughts::kDataSize, key_iv.first, key_iv.second);
-            logger_.detail("Crypto 细节",
-                           "stage=exit_reply key=init_tmp(sk)+resp_pub(head=" + pubkey_head(it->second.resp_pub) +
-                           ") field=c_data op=decrypt_payload");
+            log_crypto_key_usage(logger_,
+                                 "exit_reply",
+                                 "c_data",
+                                 "decrypt_payload",
+                                 "发起端临时私钥(init_tmp.sk)",
+                                 "响应端长期公钥(resp_pub,head=" + pubkey_head(it->second.resp_pub) + ")",
+                                 bytes_header_hex(tmp_before.data(), tmp_before.size()),
+                                 bytes_header_hex(tmp.data(), tmp.size()));
             if (!decode_payload(tmp.data(), text)) {
                 logger_.warn("failed to decrypt response payload");
                 return;
@@ -509,10 +690,17 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
         std::memcpy(pk_init.data(), p.params.pk_init_tmp, draughts::kPkSize);
         auto secret = identity_.DeriveSharedSecret(pk_init);
         auto key_iv = draughts::crypto::Sm2KeyPair::DeriveKeyAndIv(secret);
+        std::array<std::uint8_t, draughts::kDataSize> c_data_before{};
+        std::memcpy(c_data_before.data(), p.c_data, draughts::kDataSize);
         crypto::CommutativeCipher::TransformInPlace(p.c_data, draughts::kDataSize, key_iv.first, key_iv.second);
-        logger_.detail("Crypto 细节",
-                       "stage=exit_request key=identity(sk)+pk_init_tmp(head=" + pubkey_head(pk_init) +
-                       ") field=c_data op=decrypt_payload");
+        log_crypto_key_usage(logger_,
+                             "exit_request",
+                             "c_data",
+                             "decrypt_payload",
+                             "响应端长期私钥(identity.sk)",
+                             "发起端临时公钥(pk_init_tmp,head=" + pubkey_head(pk_init) + ")",
+                             bytes_header_hex(c_data_before.data(), c_data_before.size()),
+                             bytes_header_hex(p.c_data, draughts::kDataSize));
 
         std::string text;
         if (!decode_payload(p.c_data, text)) {
@@ -532,6 +720,8 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
                                   "exit_request",
                                   "c_addr_real_sender",
                                   "decrypt_at_responder",
+                                  "响应端长期私钥(identity.sk)",
+                                  "发起端临时公钥(pk_init_tmp,head=" + pubkey_head(pk_init) + ")",
                                   "identity(sk)+pk_init_tmp(head=" + pubkey_head(pk_init) + ")",
                                   sender_before,
                                   c_addr_real_sender.data());
@@ -550,6 +740,14 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
         value.topo_term = p.params.topo_term;
         value.created_ms = now_ms();
         responder_lru_.insert_head(sid, value);
+        logger_.detail("Session 细节",
+                       "stage=exit_request action=store sid=" + sid_hex +
+                       " key=session_id value={addr_ph=" + endpoint_to_string(value.addr_ph, value.port_ph) +
+                       ",addr_nnh=" + endpoint_to_string(value.addr_nnh, value.port_nnh) +
+                       ",pk_pph_tmp_head=" + pubkey_head(value.pk_pph_tmp) +
+                       ",pk_init_tmp_head=" + pubkey_head(value.pk_init_tmp) +
+                       ",c_addr_real_sender=" + addr_field_readable(value.c_addr_real_sender.data()) +
+                       ",topo_term=" + std::to_string(value.topo_term) + "}");
 
         inbox_.push_back(InboxItem{false, sid_hex, text, endpoint_to_string(from.address().to_v4(), from.port())});
         logger_.info("交付给cli type=request");
@@ -570,10 +768,11 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
             logger_.warn("next hop info not found for response bootstrap");
             return;
         }
+        logger_.info("response bootstrap: 响应包首跳下一跳候选=" + peer_label_for(nh_addr, nh_port) +
+                     " nh_pub_head=" + pubkey_head(nh_pub));
 
-        std::string exclude_peer_id;
-        auto from_desc = node_.lookup_peer_by_draughts_endpoint(from.address().to_v4(), from.port());
-        if (from_desc) exclude_peer_id = from_desc->peer_id;
+        // PICK 的排除节点应为当前节点自身，避免把自己选成 NNH。
+        std::string exclude_peer_id = cfg_.peer_id;
 
         std::string nh_peer_id;
         auto nh_desc = node_.lookup_peer_by_draughts_endpoint(nh_addr, nh_port);
@@ -582,10 +781,11 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
         address_v4 nnh_addr;
         uint16_t nnh_port = 0;
         draughts::crypto::PubKey nnh_pub{};
-        if (!pick_nnh_for_peer_id(nh_peer_id, exclude_peer_id, p.params.topo_term, nnh_addr, nnh_port, nnh_pub, true)) {
+        if (!pick_nnh_for_peer_id(nh_peer_id, exclude_peer_id, p.params.topo_term, nnh_addr, nnh_port, nnh_pub)) {
             logger_.warn("failed to pick nnh from nh neighbors for response bootstrap");
             return;
         }
+        log_packet_field_set(logger_, "response_bootstrap", "params.topo_term", std::to_string(p.params.topo_term));
         log_nh_nnh(logger_,
                    peer_label_for(nh_addr, nh_port),
                    peer_label_for(nnh_addr, nnh_port),
@@ -594,6 +794,7 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
         draughts::crypto::Sm2KeyPair ph_tmp;
         auto ph_pub = ph_tmp.public_key_raw();
         std::memcpy(p.pk_ph_tmp, ph_pub.data(), draughts::kPkSize);
+        log_packet_field_set(logger_, "response_bootstrap", "pk_ph_tmp", pubkey_head(ph_pub));
 
         // Return-entry behavior: keep c_addr_real_receiver opaque and only add one layer for picked decoy NNH.
         std::uint8_t receiver_before[draughts::kAddrSize]{};
@@ -606,23 +807,36 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
                                   "response_bootstrap",
                                   "c_addr_real_receiver",
                                   "encrypt_for_nnh",
+                                  "当前节点临时私钥(ph_tmp.sk)",
+                                  "下下跳长期公钥(nnh_pub,head=" + pubkey_head(nnh_pub) + ")",
                                   "ph_tmp(sk)+nnh_pub(head=" + pubkey_head(nnh_pub) + ")",
                                   receiver_before,
                                   p.params.c_addr_real_receiver);
 
         // Mark first response relay hop as deterministic-continue bootstrap.
         p.params.x = -std::fabs(cfg_.ciplc_x0);
+        log_packet_field_set(logger_, "response_bootstrap", "params.x", std::to_string(p.params.x));
         addr_to_bytes(nnh_addr, nnh_port, p.params.addr_nnh);
+        log_packet_field_set(logger_, "response_bootstrap", "params.addr_nnh", addr_field_readable(p.params.addr_nnh));
 
+        std::array<std::uint8_t, sizeof(draughts::DraughtsParams)> params_before{};
+        std::memcpy(params_before.data(), &p.params, params_before.size());
         if (!encrypt_params_for_next_hop(p, nh_pub, ph_tmp)) {
             logger_.warn("failed to encrypt response params");
             return;
         }
-        logger_.detail("Crypto 细节",
-                       "stage=response_bootstrap key=ph_tmp(sk)+nh_pub(head=" + pubkey_head(nh_pub) +
-                       ") field=params op=encrypt_for_next_hop");
+        log_crypto_key_usage(logger_,
+                             "response_bootstrap",
+                             "params",
+                             "encrypt_for_next_hop",
+                             "当前节点临时私钥(ph_tmp.sk)",
+                             "下一跳长期公钥(nh_pub,head=" + pubkey_head(nh_pub) + ")",
+                             bytes_header_hex(params_before.data(), params_before.size()),
+                             bytes_header_hex(reinterpret_cast<const std::uint8_t*>(&p.params),
+                                              sizeof(draughts::DraughtsParams)));
+        log_packet_cipher_snapshot(logger_, "response_bootstrap", p);
 
-        send_packet_to(p, nh_addr, nh_port);
+        send_packet_to(p, nh_addr, nh_port, "response_bootstrap_send");
         return;
     }
 
@@ -643,6 +857,11 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     bool response_first_hop = response_flow && (p.params.x < 0.0);
     auto from_desc = node_.lookup_peer_by_draughts_endpoint(from.address().to_v4(), from.port());
     std::string from_peer_id = from_desc ? from_desc->peer_id : "";
+    logger_.info("随机游走解密后 stage=entry from_peer=" + (from_peer_id.empty() ? "unknown" : from_peer_id) +
+                 " response_flow=" + std::string(response_flow ? "1" : "0") +
+                 " response_first_hop=" + std::string(response_first_hop ? "1" : "0") +
+                 " x=" + std::to_string(p.params.x));
+    log_packet_snapshot(logger_, "handle_random_walk_decrypted", p);
 
     if (approx_eq(p.params.x, 0.0)) {
         if (is_zero_pk_bytes(p.params.pk_pph_tmp) || draughts::is_exit_pk(p.params.pk_pph_tmp)) {
@@ -663,6 +882,8 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
                                       "outnode_response",
                                       "c_addr_real_receiver",
                                       "decrypt_with_pk_pph_tmp",
+                                      "当前节点长期私钥(identity.sk)",
+                                      "前前跳临时公钥(pk_pph_tmp,head=" + pubkey_head(pk_pph) + ")",
                                       "identity(sk)+pk_pph_tmp(head=" + pubkey_head(pk_pph) + ")",
                                       receiver_before,
                                       p.params.c_addr_real_receiver);
@@ -679,6 +900,8 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
                                       "outnode_request",
                                       "c_addr_real_receiver",
                                       "decrypt_with_pk_pph_tmp",
+                                      "当前节点长期私钥(identity.sk)",
+                                      "前前跳临时公钥(pk_pph_tmp,head=" + pubkey_head(pk_pph) + ")",
                                       "identity(sk)+pk_pph_tmp(head=" + pubkey_head(pk_pph) + ")",
                                       receiver_before,
                                       p.params.c_addr_real_receiver);
@@ -701,9 +924,13 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
                    "outnode_deliver");
 
         std::memcpy(p.params.pk_pph_tmp, p.pk_ph_tmp, draughts::kPkSize);
+        log_packet_field_set(logger_, "outnode_deliver", "params.pk_pph_tmp", pk_field_head(p.params.pk_pph_tmp));
         p.params.x = -1.0;
+        log_packet_field_set(logger_, "outnode_deliver", "params.x", "-1.0");
         draughts::fill_exit_pk(p.pk_ph_tmp);
-        send_packet_to(p, responder_addr, responder_port);
+        log_packet_field_set(logger_, "outnode_deliver", "pk_ph_tmp", "EXIT_MARK(0xEE)");
+        log_packet_snapshot(logger_, "outnode_deliver", p);
+        send_packet_to(p, responder_addr, responder_port, "outnode_deliver");
         return;
     }
 
@@ -721,10 +948,17 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
 
     bool do_continue = false;
     bool request_initial_stage = false;
+    bool response_bootstrap_stage = false;
+    double x_before = p.params.x;
     if (response_flow) {
         do_continue = response_first_hop;
         if (response_first_hop) {
-            p.params.x = std::fabs(p.params.x);
+            response_bootstrap_stage = true;
+            Ciplc ciplc = ciplc_;
+            ciplc.x = std::fabs(p.params.x);
+            (void)ciplc.step_and_decide(rng_);
+            // Keep response bootstrap marker one-shot: next hop should not be treated as first hop again.
+            p.params.x = std::fabs(ciplc.x);
         }
     } else {
         Ciplc ciplc = ciplc_;
@@ -735,9 +969,15 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
         // Initial request stage always continues path expansion while still updating x.
         do_continue = can_continue && (request_initial_stage || mapped_continue);
     }
+    logger_.info("随机游走决策 can_continue=" + std::string(can_continue ? "1" : "0") +
+                 " do_continue=" + std::string(do_continue ? "1" : "0") +
+                 " request_initial_stage=" + std::string(request_initial_stage ? "1" : "0") +
+                 " response_bootstrap_stage=" + std::string(response_bootstrap_stage ? "1" : "0") +
+                 " x_before=" + std::to_string(x_before) +
+                 " x_after=" + std::to_string(p.params.x));
 
-    std::string exclude_peer_id;
-    if (from_desc) exclude_peer_id = from_desc->peer_id;
+    // PICK 的排除节点应为当前节点自身，避免把自己选成 NNH。
+    std::string exclude_peer_id = cfg_.peer_id;
 
     if (do_continue) {
         draughts::crypto::PubKey nh_pub{};
@@ -757,6 +997,10 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
             logger_.warn("failed to pick nnh for relay");
             return;
         }
+        log_packet_field_set(logger_,
+                             response_flow ? "response_continue" : "relay_continue",
+                             "params.topo_term",
+                             std::to_string(p.params.topo_term));
         auto nnh_desc = node_.lookup_peer_by_draughts_endpoint(nnh_addr, nnh_port);
         std::string nnh_peer_id = nnh_desc ? nnh_desc->peer_id : "";
         (void)nnh_peer_id;
@@ -790,6 +1034,8 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
                                   flow_stage,
                                   "c_addr_real_receiver",
                                   "decrypt_with_pk_pph_tmp",
+                                  "当前节点长期私钥(identity.sk)",
+                                  "前前跳临时公钥(pk_pph_tmp,head=" + pubkey_head(pk_pph) + ")",
                                   "identity(sk)+pk_pph_tmp(head=" + pubkey_head(pk_pph) + ")",
                                   receiver_before_peel,
                                   p.params.c_addr_real_receiver);
@@ -804,21 +1050,34 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
                                   flow_stage,
                                   "c_addr_real_receiver",
                                   "encrypt_for_nnh",
+                                  "当前节点临时私钥(ph_tmp.sk)",
+                                  "下下跳长期公钥(nnh_pub,head=" + pubkey_head(nnh_pub) + ")",
                                   "ph_tmp(sk)+nnh_pub(head=" + pubkey_head(nnh_pub) + ")",
                                   receiver_before_add,
                                   p.params.c_addr_real_receiver);
         std::memcpy(p.params.pk_pph_tmp, old_ph.data(), draughts::kPkSize);
+        log_packet_field_set(logger_, std::string(flow_stage), "params.pk_pph_tmp", pk_field_head(p.params.pk_pph_tmp));
         addr_to_bytes(nnh_addr, nnh_port, p.params.addr_nnh);
+        log_packet_field_set(logger_, std::string(flow_stage), "params.addr_nnh", addr_field_readable(p.params.addr_nnh));
 
+        std::array<std::uint8_t, sizeof(draughts::DraughtsParams)> params_before{};
+        std::memcpy(params_before.data(), &p.params, params_before.size());
         if (!encrypt_params_for_next_hop(p, nh_pub, ph_tmp)) {
             logger_.warn("failed to encrypt params for relay");
             return;
         }
-        logger_.detail("Crypto 细节",
-                       "stage=relay_continue key=ph_tmp(sk)+nh_pub(head=" + pubkey_head(nh_pub) +
-                       ") field=params op=encrypt_for_next_hop");
+        log_crypto_key_usage(logger_,
+                             flow_stage,
+                             "params",
+                             "encrypt_for_next_hop",
+                             "当前节点临时私钥(ph_tmp.sk)",
+                             "下一跳长期公钥(nh_pub,head=" + pubkey_head(nh_pub) + ")",
+                             bytes_header_hex(params_before.data(), params_before.size()),
+                             bytes_header_hex(reinterpret_cast<const std::uint8_t*>(&p.params),
+                                              sizeof(draughts::DraughtsParams)));
+        log_packet_cipher_snapshot(logger_, std::string(flow_stage), p);
 
-        send_packet_to(p, nh_addr, nh_port);
+        send_packet_to(p, nh_addr, nh_port, std::string(flow_stage) + "_send");
         return;
     }
 
@@ -849,10 +1108,11 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     uint16_t nnh_port = 0;
     draughts::crypto::PubKey nnh_pub{};
     if (!response_flow) {
-        if (!pick_nnh_for_peer_id(outnode_peer_id, exclude_peer_id, p.params.topo_term, nnh_addr, nnh_port, nnh_pub, true)) {
+        if (!pick_nnh_for_peer_id(outnode_peer_id, exclude_peer_id, p.params.topo_term, nnh_addr, nnh_port, nnh_pub)) {
             logger_.warn("failed to pick nnh from outnode neighbors for outnode leg");
             return;
         }
+        log_packet_field_set(logger_, "outnode_exit", "params.topo_term", std::to_string(p.params.topo_term));
     }
 
     log_nh_nnh(logger_,
@@ -882,6 +1142,8 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
                                   "outnode_exit_response",
                                   "c_addr_real_receiver",
                                   "decrypt_with_pk_pph_tmp",
+                                  "当前节点长期私钥(identity.sk)",
+                                  "前前跳临时公钥(pk_pph_tmp,head=" + pubkey_head(pk_pph) + ")",
                                   "identity(sk)+pk_pph_tmp(head=" + pubkey_head(pk_pph) + ")",
                                   receiver_before,
                                   p.params.c_addr_real_receiver);
@@ -896,6 +1158,8 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
                                   "outnode_exit_request",
                                   "c_addr_real_receiver",
                                   "decrypt_with_pk_pph_tmp",
+                                  "当前节点长期私钥(identity.sk)",
+                                  "前前跳临时公钥(pk_pph_tmp,head=" + pubkey_head(pk_pph) + ")",
                                   "identity(sk)+pk_pph_tmp(head=" + pubkey_head(pk_pph) + ")",
                                   receiver_before,
                                   p.params.c_addr_real_receiver);
@@ -910,30 +1174,46 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
                                   "outnode_exit_request",
                                   "c_addr_real_sender",
                                   "encrypt_for_nnh",
+                                  "当前节点临时私钥(ph_tmp.sk)",
+                                  "下下跳长期公钥(nnh_pub,head=" + pubkey_head(nnh_pub) + ")",
                                   "ph_tmp(sk)+nnh_pub(head=" + pubkey_head(nnh_pub) + ")",
                                   sender_before,
                                   p.params.c_addr_real_sender);
     }
 
     p.params.x = 0.0;
+    log_packet_field_set(logger_, "outnode_exit", "params.x", "0.0");
     if (!response_flow) {
         addr_to_bytes(nnh_addr, nnh_port, p.params.addr_nnh);
+        log_packet_field_set(logger_, "outnode_exit", "params.addr_nnh", addr_field_readable(p.params.addr_nnh));
     } else {
         draughts::zero_addr(p.params.addr_nnh);
+        log_packet_field_set(logger_, "outnode_exit", "params.addr_nnh", addr_field_readable(p.params.addr_nnh));
     }
 
     std::memcpy(p.pk_ph_tmp, ph_pub.data(), draughts::kPkSize);
+    log_packet_field_set(logger_, "outnode_exit", "pk_ph_tmp", pubkey_head(ph_pub));
     std::memcpy(p.params.pk_pph_tmp, prev_ph.data(), draughts::kPkSize);
+    log_packet_field_set(logger_, "outnode_exit", "params.pk_pph_tmp", pk_field_head(p.params.pk_pph_tmp));
 
+    std::array<std::uint8_t, sizeof(draughts::DraughtsParams)> params_before{};
+    std::memcpy(params_before.data(), &p.params, params_before.size());
     if (!encrypt_params_for_next_hop(p, outnode_pub, ph_tmp)) {
         logger_.warn("failed to encrypt params for outnode");
         return;
     }
-    logger_.detail("Crypto 细节",
-                   "stage=outnode_exit key=ph_tmp(sk)+outnode_pub(head=" + pubkey_head(outnode_pub) +
-                   ") field=params op=encrypt_for_next_hop");
+    log_crypto_key_usage(logger_,
+                         "outnode_exit",
+                         "params",
+                         "encrypt_for_next_hop",
+                         "当前节点临时私钥(ph_tmp.sk)",
+                         "outnode长期公钥(outnode_pub,head=" + pubkey_head(outnode_pub) + ")",
+                         bytes_header_hex(params_before.data(), params_before.size()),
+                         bytes_header_hex(reinterpret_cast<const std::uint8_t*>(&p.params),
+                                          sizeof(draughts::DraughtsParams)));
+    log_packet_cipher_snapshot(logger_, "outnode_exit", p);
 
-    send_packet_to(p, outnode_addr, outnode_port);
+    send_packet_to(p, outnode_addr, outnode_port, "outnode_exit_send");
 }
 
 bool DraughtsApp::decrypt_params(draughts::DraughtsPacket& p) {
@@ -943,7 +1223,17 @@ bool DraughtsApp::decrypt_params(draughts::DraughtsPacket& p) {
     auto key_iv = draughts::crypto::Sm2KeyPair::DeriveKeyAndIv(secret);
 
     auto* params_bytes = reinterpret_cast<std::uint8_t*>(&p.params);
+    std::array<std::uint8_t, sizeof(draughts::DraughtsParams)> params_before{};
+    std::memcpy(params_before.data(), params_bytes, params_before.size());
     crypto::CommutativeCipher::TransformInPlace(params_bytes, sizeof(draughts::DraughtsParams), key_iv.first, key_iv.second);
+    log_crypto_key_usage(logger_,
+                         "decrypt_params",
+                         "params",
+                         "decrypt_by_pk_ph_tmp",
+                         "当前节点长期私钥(identity.sk)",
+                         "前跳临时公钥(pk_ph_tmp,head=" + pubkey_head(pk_ph) + ")",
+                         bytes_header_hex(params_before.data(), params_before.size()),
+                         bytes_header_hex(params_bytes, sizeof(draughts::DraughtsParams)));
     return true;
 }
 
@@ -959,12 +1249,16 @@ bool DraughtsApp::encrypt_params_for_next_hop(draughts::DraughtsPacket& p,
 
 bool DraughtsApp::send_packet_to(const draughts::DraughtsPacket& p,
                                  const address_v4& addr,
-                                 uint16_t port) {
+                                 uint16_t port,
+                                 const std::string& stage) {
     if (port == 0) return false;
     udp::endpoint ep(addr, port);
     auto buf = std::make_shared<std::array<uint8_t, draughts::kPacketSize>>();
     std::memcpy(buf->data(), &p, draughts::kPacketSize);
-    logger_.info("转发数据包给" + peer_label_for(addr, port));
+    std::string suffix;
+    if (!stage.empty()) suffix = " stage=" + stage;
+    logger_.info("转发数据包给" + peer_label_for(addr, port) + suffix +
+                 " session=" + session_hex_from_packet(p));
     sock_.async_send_to(boost::asio::buffer(*buf), ep, [buf](auto, auto) {});
     return true;
 }
@@ -974,6 +1268,13 @@ std::string DraughtsApp::peer_label_for(const address_v4& addr, uint16_t port) c
     auto ep = endpoint_to_string(addr, port);
     if (desc && !desc->peer_id.empty()) {
         return desc->peer_id + "@" + ep;
+    }
+    if (port == cfg_.draughts_port) {
+        boost::system::error_code ec;
+        auto self_addr = address_v4::from_string(cfg_.bind_ip, ec);
+        if (!ec && self_addr == addr && !cfg_.peer_id.empty()) {
+            return cfg_.peer_id + "@" + ep;
+        }
     }
     return ep;
 }
@@ -997,6 +1298,7 @@ bool DraughtsApp::pick_nh_nnh(address_v4& nh_addr,
         logger_.warn("topod disabled; static topology compatibility is removed");
         return false;
     }
+    logger_.info("开始选择路由 stage=pick_nh_nnh exclude_peer_id=" + (exclude_peer_id.empty() ? "none" : exclude_peer_id));
     TopodClient::RoutePlan plan{};
     if (!topod_.pick_route(exclude_peer_id, plan)) {
         logger_.warn("topod PLAN query failed");
@@ -1010,43 +1312,70 @@ bool DraughtsApp::pick_nh_nnh(address_v4& nh_addr,
     nnh_pub = plan.nnh.pubkey;
     topo_term = plan.term;
     node_.cache_twohop_neighbor(plan.nh.peer_id, plan.nnh.peer_id);
+    logger_.info("路由选择完成 topo_term=" + std::to_string(topo_term) +
+                 " nh=" + plan.nh.peer_id + "@" + endpoint_to_string(nh_addr, nh_port) +
+                 " nnh=" + plan.nnh.peer_id + "@" + endpoint_to_string(nnh_addr, nnh_port) +
+                 " nh_pub_head=" + pubkey_head(nh_pub) +
+                 " nnh_pub_head=" + pubkey_head(nnh_pub));
     return true;
 }
 
 bool DraughtsApp::pick_nnh_for_peer_id(const std::string& nh_peer_id,
                                        const std::string& exclude_peer_id,
-    std::uint64_t topo_term,
+    std::uint64_t& topo_term,
     address_v4& nnh_addr,
     uint16_t& nnh_port,
-    draughts::crypto::PubKey& nnh_pub,
-    bool strict_from_nh_neighbors) {
+    draughts::crypto::PubKey& nnh_pub) {
     if (!topod_.enabled()) {
-        logger_.warn("topod disabled; cannot pick history nnh");
+        logger_.warn("topod disabled; cannot pick nnh via PICK");
         return false;
     }
     if (nh_peer_id.empty() || topo_term == 0) {
-        logger_.warn("invalid inputs for topod HISTORY nnh pick");
+        logger_.warn("invalid inputs for topod PICK nnh query");
         return false;
     }
+    std::string nh_label = nh_peer_id;
+    if (auto nh_desc = node_.lookup_peer(nh_peer_id); nh_desc && nh_desc->draughts_port != 0) {
+        nh_label = nh_desc->peer_id + "@" + endpoint_to_string(addr_from_bytes(nh_desc->ip), nh_desc->draughts_port);
+    }
+    logger_.info("根据下一跳" + nh_label + "选择下下跳 term=" + std::to_string(topo_term) +
+                 " exclude=" + (exclude_peer_id.empty() ? "none" : exclude_peer_id));
     TopodClient::HopInfo nnh{};
-    bool ok = topod_.pick_history_nnh(nh_peer_id, topo_term, exclude_peer_id, strict_from_nh_neighbors, nnh);
-    if (!ok && strict_from_nh_neighbors) {
-        logger_.warn("topod HISTORY strict查询失败，回退到strict=0");
-        ok = topod_.pick_history_nnh(nh_peer_id, topo_term, exclude_peer_id, false, nnh);
-        if (ok) {
-            logger_.info("topod HISTORY 回退成功 peer=" + nh_peer_id +
-                         " term=" + std::to_string(topo_term) +
-                         " nnh=" + nnh.peer_id);
-        }
-    }
+    std::uint64_t resolved_term = topo_term;
+    bool ok = topod_.pick_pick_nnh(nh_peer_id, topo_term, exclude_peer_id, resolved_term, nnh);
     if (!ok) {
-        logger_.warn("topod HISTORY nnh query failed");
-        return false;
+        logger_.warn("topod PICK nnh query failed (strict-only mode), fallback to node twohop/active cache");
+        auto fallback_nnh_id = node_.pick_nnh_for(nh_peer_id, exclude_peer_id, false);
+        if (!fallback_nnh_id) {
+            logger_.warn("fallback nnh pick failed: no candidate in node cache");
+            return false;
+        }
+        auto fallback_desc = node_.lookup_peer(*fallback_nnh_id);
+        if (!fallback_desc || fallback_desc->draughts_port == 0) {
+            logger_.warn("fallback nnh pick failed: peer descriptor missing for " + *fallback_nnh_id);
+            return false;
+        }
+        nnh_addr = addr_from_bytes(fallback_desc->ip);
+        nnh_port = fallback_desc->draughts_port;
+        if (!get_peer_pubkey_by_endpoint(nnh_addr, nnh_port, nnh_pub)) {
+            logger_.warn("fallback nnh pick failed: pubkey missing for " + *fallback_nnh_id);
+            return false;
+        }
+        node_.cache_twohop_neighbor(nh_peer_id, *fallback_nnh_id);
+        // PICK 失败时没有新的 term，保持来包 term 不变。
+        logger_.info("根据下一跳" + nh_label + "回退选择下下跳结果=" + *fallback_nnh_id + "@" +
+                     endpoint_to_string(nnh_addr, nnh_port) +
+                     " nnh_pub_head=" + pubkey_head(nnh_pub));
+        return true;
     }
+    topo_term = resolved_term;
     nnh_addr = nnh.addr;
     nnh_port = nnh.port;
     nnh_pub = nnh.pubkey;
     node_.cache_twohop_neighbor(nh_peer_id, nnh.peer_id);
+    logger_.info("根据下一跳" + nh_label + "选择下下跳结果=" + nnh.peer_id + "@" +
+                 endpoint_to_string(nnh_addr, nnh_port) +
+                 " nnh_pub_head=" + pubkey_head(nnh_pub));
     return true;
 }
 
@@ -1174,6 +1503,9 @@ bool DraughtsApp::get_peer_pubkey_by_endpoint(const address_v4& addr,
     }
     if (raw.size() != draughts::kPkSize) return false;
     std::memcpy(out_pubkey.data(), raw.data(), draughts::kPkSize);
+    logger_.detail("Route 细节",
+                   "stage=get_peer_pubkey_by_endpoint ep=" + endpoint_to_string(addr, port) +
+                   " pub_head=" + pubkey_head(out_pubkey));
     return true;
 }
 
@@ -1272,27 +1604,36 @@ bool DraughtsApp::send_request_with_session(const std::string& sid,
         logger_.warn("cli send failed: no active neighbors");
         return false;
     }
+    logger_.detail("Session 细节",
+                   "stage=send_request_with_session action=get sid=" + session_hex(sid) +
+                   " key=session_id value={resp_peer=" + session.resp_peer_id +
+                   ",resp_ep=" + endpoint_to_string(session.resp_addr, session.resp_port) +
+                   ",resp_pub_head=" + pubkey_head(session.resp_pub) + "}");
 
     const std::string sid_hex = session_hex(sid);
 
     draughts::DraughtsPacket p{};
+    log_packet_construct(logger_, "cli_request_build_packet", sid_hex, "request");
     std::memcpy(p.session_id, sid.data(), draughts::kSessionIdSize);
+    log_packet_field_set(logger_, "cli_request_build_packet", "session_id", sid_hex);
 
     draughts::crypto::Sm2KeyPair ph_tmp;
     auto ph_pub = ph_tmp.public_key_raw();
     std::memcpy(p.pk_ph_tmp, ph_pub.data(), draughts::kPkSize);
+    log_packet_field_set(logger_, "cli_request_build_packet", "pk_ph_tmp", pubkey_head(ph_pub));
     std::memcpy(p.params.pk_pph_tmp, ph_pub.data(), draughts::kPkSize);
+    log_packet_field_set(logger_, "cli_request_build_packet", "params.pk_pph_tmp", pk_field_head(p.params.pk_pph_tmp));
 
     auto init_pub = session.init_key.public_key_raw();
     std::memcpy(p.params.pk_init_tmp, init_pub.data(), draughts::kPkSize);
+    log_packet_field_set(logger_, "cli_request_build_packet", "params.pk_init_tmp", pubkey_head(init_pub));
 
     addr_to_bytes(nnh_addr, nnh_port, p.params.addr_nnh);
+    log_packet_field_set(logger_, "cli_request_build_packet", "params.addr_nnh", addr_field_readable(p.params.addr_nnh));
     addr_to_bytes(session.resp_addr, session.resp_port, p.params.c_addr_real_receiver);
+    log_packet_field_set(logger_, "cli_request_build_packet", "params.c_addr_real_receiver", addr_field_readable(p.params.c_addr_real_receiver));
     addr_to_bytes(address_v4::from_string(cfg_.bind_ip), cfg_.draughts_port, p.params.c_addr_real_sender);
-    logger_.detail("Field 细节",
-                   "stage=cli_request_init field=addr_nnh set=" + addr_field_hex(p.params.addr_nnh) +
-                   " field=c_addr_real_receiver set=" + addr_field_hex(p.params.c_addr_real_receiver) +
-                   " field=c_addr_real_sender set=" + addr_field_hex(p.params.c_addr_real_sender));
+    log_packet_field_set(logger_, "cli_request_build_packet", "params.c_addr_real_sender", addr_field_readable(p.params.c_addr_real_sender));
 
     std::uint8_t before_receiver_1[draughts::kAddrSize]{};
     std::memcpy(before_receiver_1, p.params.c_addr_real_receiver, draughts::kAddrSize);
@@ -1305,6 +1646,8 @@ bool DraughtsApp::send_request_with_session(const std::string& sid,
                               "cli_request",
                               "c_addr_real_receiver",
                               "encrypt_for_nh",
+                              "当前节点临时私钥(ph_tmp.sk)",
+                              "下一跳长期公钥(nh_pub,head=" + pubkey_head(nh_pub) + ")",
                               "ph_tmp(sk)+nh_pub(head=" + pubkey_head(nh_pub) + ")",
                               before_receiver_1,
                               p.params.c_addr_real_receiver);
@@ -1320,6 +1663,8 @@ bool DraughtsApp::send_request_with_session(const std::string& sid,
                               "cli_request",
                               "c_addr_real_receiver",
                               "encrypt_for_nnh",
+                              "当前节点临时私钥(ph_tmp.sk)",
+                              "下下跳长期公钥(nnh_pub,head=" + pubkey_head(nnh_pub) + ")",
                               "ph_tmp(sk)+nnh_pub(head=" + pubkey_head(nnh_pub) + ")",
                               before_receiver_2,
                               p.params.c_addr_real_receiver);
@@ -1335,13 +1680,18 @@ bool DraughtsApp::send_request_with_session(const std::string& sid,
                               "cli_request",
                               "c_addr_real_sender",
                               "encrypt_for_responder",
+                              "发起端临时私钥(init_tmp.sk)",
+                              "响应端长期公钥(resp_pub,head=" + pubkey_head(session.resp_pub) + ")",
                               "init_tmp(sk)+resp_pub(head=" + pubkey_head(session.resp_pub) + ")",
                               before_sender,
                               p.params.c_addr_real_sender);
 
     p.params.x = cfg_.ciplc_x0;
+    log_packet_field_set(logger_, "cli_request_build_packet", "params.x", std::to_string(p.params.x));
     p.params.topo_term = topo_term;
+    log_packet_field_set(logger_, "cli_request_build_packet", "params.topo_term", std::to_string(topo_term));
     p.params.magic_num = cfg_.magic_num;
+    log_packet_field_set(logger_, "cli_request_build_packet", "params.magic_num", "0x" + hex_bytes(reinterpret_cast<const std::uint8_t*>(&cfg_.magic_num), sizeof(cfg_.magic_num)));
 
     std::uint8_t pt[draughts::kDataSize] = {};
     encode_payload(text, pt);
@@ -1349,29 +1699,43 @@ bool DraughtsApp::send_request_with_session(const std::string& sid,
     auto secret = session.init_key.DeriveSharedSecret(session.resp_pub);
     auto key_iv = draughts::crypto::Sm2KeyPair::DeriveKeyAndIv(secret);
     std::memcpy(p.c_data, pt, draughts::kDataSize);
+    std::array<std::uint8_t, draughts::kDataSize> c_data_before{};
+    std::memcpy(c_data_before.data(), p.c_data, draughts::kDataSize);
+    log_packet_field_set(logger_, "cli_request_build_packet", "c_data", "plaintext_encoded_then_encrypt");
     crypto::CommutativeCipher::TransformInPlace(p.c_data, draughts::kDataSize, key_iv.first, key_iv.second);
-    logger_.detail("Crypto 细节",
-                   "stage=cli_request key=init_tmp(sk)+resp_pub(head=" + pubkey_head(session.resp_pub) +
-                   ") field=c_data op=encrypt_payload");
+    log_crypto_key_usage(logger_,
+                         "cli_request",
+                         "c_data",
+                         "encrypt_payload",
+                         "发起端临时私钥(init_tmp.sk)",
+                         "响应端长期公钥(resp_pub,head=" + pubkey_head(session.resp_pub) + ")",
+                         bytes_header_hex(c_data_before.data(), c_data_before.size()),
+                         bytes_header_hex(p.c_data, draughts::kDataSize));
 
+    std::array<std::uint8_t, sizeof(draughts::DraughtsParams)> params_before{};
+    std::memcpy(params_before.data(), &p.params, params_before.size());
     if (!encrypt_params_for_next_hop(p, nh_pub, ph_tmp)) {
         console_.println("failed to encrypt params for first hop");
         logger_.warn("cli send failed: encrypt params");
         return false;
     }
-    logger_.detail("Crypto 细节",
-                   "stage=cli_request key=ph_tmp(sk)+nh_pub(head=" + pubkey_head(nh_pub) +
-                   ") field=params op=encrypt_for_first_hop");
+    log_crypto_key_usage(logger_,
+                         "cli_request",
+                         "params",
+                         "encrypt_for_first_hop",
+                         "当前节点临时私钥(ph_tmp.sk)",
+                         "下一跳长期公钥(nh_pub,head=" + pubkey_head(nh_pub) + ")",
+                         bytes_header_hex(params_before.data(), params_before.size()),
+                         bytes_header_hex(reinterpret_cast<const std::uint8_t*>(&p.params),
+                                          sizeof(draughts::DraughtsParams)));
+    log_packet_cipher_snapshot(logger_, "cli_request_ready_to_send", p);
 
-    logger_.info("cli send request responder=" + endpoint_to_string(session.resp_addr, session.resp_port) +
-                 " nh=" + endpoint_to_string(nh_addr, nh_port) +
-                 " nnh=" + endpoint_to_string(nnh_addr, nnh_port));
-    log_nh_nnh(logger_,
-               peer_label_for(nh_addr, nh_port),
-               peer_label_for(nnh_addr, nnh_port),
-               "cli_request");
+    logger_.info("cli send request responder=" + peer_label_for(session.resp_addr, session.resp_port) +
+                 " nh=" + peer_label_for(nh_addr, nh_port) +
+                 " nnh=" + peer_label_for(nnh_addr, nnh_port) +
+                 " topo_term=" + std::to_string(topo_term));
 
-    if (!send_packet_to(p, nh_addr, nh_port)) {
+    if (!send_packet_to(p, nh_addr, nh_port, "cli_request_send")) {
         console_.println("failed to send packet to next hop");
         logger_.warn("cli send failed");
         return false;
@@ -1387,6 +1751,10 @@ void DraughtsApp::prune_sessions() {
     uint64_t now = now_ms();
     for (auto it = initiator_sessions_.begin(); it != initiator_sessions_.end(); ) {
         if (now - it->second.last_used_ms > cfg_.session_ttl_ms) {
+            logger_.detail("Session 细节",
+                           "stage=prune_sessions action=erase sid=" + session_hex(it->first) +
+                           " reason=ttl_expired ttl_ms=" + std::to_string(cfg_.session_ttl_ms) +
+                           " idle_ms=" + std::to_string(now - it->second.last_used_ms));
             initiator_session_ids_.erase(it->first);
             it = initiator_sessions_.erase(it);
         } else {

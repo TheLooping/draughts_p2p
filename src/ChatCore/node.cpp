@@ -157,7 +157,7 @@ bool DraughtsNode::start() {
     }
     active_neighbors_.clear();
     twohop_.clear();
-    logger_.info("static topology compatibility disabled; routing depends on TopoDaemon PLAN/HISTORY");
+    logger_.info("static topology compatibility disabled; routing depends on TopoDaemon PLAN/PICK");
     sync_active_neighbors_from_topod();
     update_active_neighbors_file(true);
     tick_housekeeping();
@@ -201,31 +201,92 @@ void DraughtsNode::cmd_show_twohop() {
     // Refresh from TopoDaemon on demand so CLI reflects runtime view even before first send.
     sync_twohop_from_topod();
 
-    console_.println("Two-hop cache entries: " + std::to_string(twohop_.size()));
+    console_.println("Two-hop cache owners: " + std::to_string(twohop_.size()));
     if (twohop_.empty()) {
         console_.println("  (empty)");
         logger_.info("cli twohop entries=0");
         return;
     }
+
+    std::vector<std::string> owners;
+    owners.reserve(twohop_.size());
     for (const auto& kv : twohop_) {
-        const auto& peer = kv.first;
-        const auto& e = kv.second;
+        owners.push_back(kv.first);
+    }
+    std::sort(owners.begin(), owners.end());
+
+    for (const auto& owner : owners) {
+        const auto& e = twohop_.at(owner);
         std::ostringstream oss;
-        oss << "  * " << peer << " (" << e.neighbors.size() << "):";
+        std::uint64_t latest_term = e.snapshots.empty() ? 0 : e.snapshots.back().term;
+        oss << "  * " << owner
+            << " snapshots=" << e.snapshots.size()
+            << " latest_term=" << latest_term;
         console_.println(oss.str());
-        if (e.neighbors.empty()) {
+
+        if (e.snapshots.empty()) {
             console_.println("    (none)");
             continue;
         }
-        std::ostringstream line;
-        line << "    ";
-        for (size_t i = 0; i < e.neighbors.size(); ++i) {
-            if (i > 0) line << ", ";
-            line << e.neighbors[i].peer_id;
+
+        for (const auto& snap : e.snapshots) {
+            std::ostringstream line;
+            line << "    - term=" << snap.term << ": ";
+            if (snap.neighbors.empty()) {
+                line << "(none)";
+                console_.println(line.str());
+                continue;
+            }
+            for (size_t i = 0; i < snap.neighbors.size(); ++i) {
+                if (i > 0) line << ", ";
+                line << snap.neighbors[i].peer_id;
+            }
+            console_.println(line.str());
         }
-        console_.println(line.str());
     }
-    logger_.info("cli twohop entries=" + std::to_string(twohop_.size()));
+
+    std::vector<std::string> active_ids;
+    active_ids.reserve(active_neighbors_.size());
+    for (const auto& d : active_neighbors_) {
+        if (!d.peer_id.empty()) active_ids.push_back(d.peer_id);
+    }
+    std::sort(active_ids.begin(), active_ids.end());
+
+    std::ostringstream active_oss;
+    active_oss << "{";
+    for (size_t i = 0; i < active_ids.size(); ++i) {
+        if (i > 0) active_oss << ",";
+        active_oss << active_ids[i];
+    }
+    active_oss << "}";
+
+    std::ostringstream map_oss;
+    map_oss << "{";
+    for (size_t i = 0; i < owners.size(); ++i) {
+        if (i > 0) map_oss << ";";
+        const auto& owner = owners[i];
+        map_oss << owner << "=[";
+        auto it = twohop_.find(owner);
+        if (it != twohop_.end()) {
+            const auto& snaps = it->second.snapshots;
+            for (size_t j = 0; j < snaps.size(); ++j) {
+                if (j > 0) map_oss << ",";
+                map_oss << "(term=" << snaps[j].term << "){";
+                for (size_t k = 0; k < snaps[j].neighbors.size(); ++k) {
+                    if (k > 0) map_oss << ",";
+                    map_oss << snaps[j].neighbors[k].peer_id;
+                }
+                map_oss << "}";
+            }
+        }
+        map_oss << "]";
+    }
+    map_oss << "}";
+
+    logger_.info("cli twohop结果 self=" + self_.peer_id +
+                 " term=" + std::to_string(topod_term_) +
+                 " active=" + active_oss.str() +
+                 " twohop=" + map_oss.str());
 }
 
 void DraughtsNode::cmd_show_peers() {
@@ -321,13 +382,43 @@ void DraughtsNode::cache_twohop_neighbor(const std::string& nh_peer_id, const st
     }
 
     auto& entry = twohop_[nh_peer_id];
+    bool exists = false;
     for (const auto& d : entry.neighbors) {
-        if (d.peer_id == nnh_peer_id) return;
+        if (d.peer_id == nnh_peer_id) {
+            exists = true;
+            break;
+        }
     }
-    entry.neighbors.push_back(std::move(nnh_desc));
-    std::sort(entry.neighbors.begin(), entry.neighbors.end(), [](const auto& a, const auto& b) {
-        return a.peer_id < b.peer_id;
-    });
+    if (!exists) {
+        entry.neighbors.push_back(std::move(nnh_desc));
+        std::sort(entry.neighbors.begin(), entry.neighbors.end(), [](const auto& a, const auto& b) {
+            return a.peer_id < b.peer_id;
+        });
+    }
+
+    std::uint64_t term_for_cache = topod_term_;
+    if (term_for_cache == 0 && !entry.snapshots.empty()) {
+        term_for_cache = entry.snapshots.back().term;
+    }
+    if (term_for_cache == 0) {
+        term_for_cache = 1;
+    }
+
+    auto it_snap = std::find_if(entry.snapshots.begin(), entry.snapshots.end(),
+                                [term_for_cache](const TwoHopSnapshot& s) {
+                                    return s.term == term_for_cache;
+                                });
+    if (it_snap == entry.snapshots.end()) {
+        TwoHopSnapshot snap{};
+        snap.term = term_for_cache;
+        snap.neighbors = entry.neighbors;
+        entry.snapshots.push_back(std::move(snap));
+        std::sort(entry.snapshots.begin(), entry.snapshots.end(), [](const TwoHopSnapshot& a, const TwoHopSnapshot& b) {
+            return a.term < b.term;
+        });
+    } else {
+        it_snap->neighbors = entry.neighbors;
+    }
 }
 
 // ------------------- Helpers -------------------
@@ -471,32 +562,52 @@ bool DraughtsNode::sync_twohop_from_topod() {
         if (nh_peer_id == self_.peer_id) continue;
         if (!is_active_neighbor(nh_peer_id)) continue;
 
-        std::vector<proto::PeerDescriptor> nnh_descs;
-        auto it_nnh = view.twohop_peer_ids.find(nh_peer_id);
-        if (it_nnh != view.twohop_peer_ids.end()) {
-            std::unordered_set<std::string> seen;
-            for (const auto& nnh_peer_id : it_nnh->second) {
-                if (nnh_peer_id.empty()) continue;
-                if (nnh_peer_id == self_.peer_id || nnh_peer_id == nh_peer_id) continue;
-                if (!seen.insert(nnh_peer_id).second) continue;
+        std::vector<TwoHopSnapshot> snapshots;
+        auto it_owner = view.snapshots_by_owner.find(nh_peer_id);
+        if (it_owner != view.snapshots_by_owner.end()) {
+            snapshots.reserve(it_owner->second.size());
+            for (const auto& snap_view : it_owner->second) {
+                std::vector<proto::PeerDescriptor> nnh_descs;
+                std::unordered_set<std::string> seen;
+                for (const auto& nnh_peer_id : snap_view.nnh_peer_ids) {
+                    if (nnh_peer_id.empty()) continue;
+                    if (nnh_peer_id == self_.peer_id || nnh_peer_id == nh_peer_id) continue;
+                    if (!seen.insert(nnh_peer_id).second) continue;
 
-                proto::PeerDescriptor d{};
-                auto it_desc = directory_.find(nnh_peer_id);
-                if (it_desc != directory_.end()) {
-                    d = it_desc->second;
-                } else if (load_peer_descriptor(nnh_peer_id, cfg_.peer_info_dir, d)) {
-                    learn_peer(d);
-                } else {
-                    d.peer_id = nnh_peer_id;
+                    proto::PeerDescriptor d{};
+                    auto it_desc = directory_.find(nnh_peer_id);
+                    if (it_desc != directory_.end()) {
+                        d = it_desc->second;
+                    } else if (load_peer_descriptor(nnh_peer_id, cfg_.peer_info_dir, d)) {
+                        learn_peer(d);
+                    } else {
+                        d.peer_id = nnh_peer_id;
+                    }
+                    nnh_descs.push_back(std::move(d));
                 }
-                nnh_descs.push_back(std::move(d));
+                std::sort(nnh_descs.begin(), nnh_descs.end(), [](const auto& a, const auto& b) {
+                    return a.peer_id < b.peer_id;
+                });
+
+                TwoHopSnapshot snap{};
+                snap.term = snap_view.term;
+                snap.neighbors = std::move(nnh_descs);
+                snapshots.push_back(std::move(snap));
             }
-            std::sort(nnh_descs.begin(), nnh_descs.end(), [](const auto& a, const auto& b) {
-                return a.peer_id < b.peer_id;
+            std::sort(snapshots.begin(), snapshots.end(), [](const TwoHopSnapshot& a, const TwoHopSnapshot& b) {
+                return a.term < b.term;
             });
         }
 
-        next.emplace(nh_peer_id, TwoHopEntry{std::move(nnh_descs)});
+        std::vector<proto::PeerDescriptor> latest_neighbors;
+        if (!snapshots.empty()) {
+            latest_neighbors = snapshots.back().neighbors;
+        }
+
+        TwoHopEntry entry{};
+        entry.snapshots = std::move(snapshots);
+        entry.neighbors = std::move(latest_neighbors);
+        next.emplace(nh_peer_id, std::move(entry));
     }
 
     twohop_ = std::move(next);
@@ -517,20 +628,33 @@ void DraughtsNode::prune_twohop_cache() {
             continue;
         }
 
-        std::vector<proto::PeerDescriptor> next;
-        next.reserve(it->second.neighbors.size());
-        std::unordered_set<std::string> seen;
-        for (const auto& d : it->second.neighbors) {
-            if (d.peer_id.empty()) continue;
-            if (d.peer_id == self_.peer_id) continue;
-            if (d.peer_id == it->first) continue;
-            if (!seen.insert(d.peer_id).second) continue;
-            next.push_back(d);
+        auto normalize_neighbors = [this](const std::string& owner, std::vector<proto::PeerDescriptor>& peers) {
+            std::vector<proto::PeerDescriptor> filtered;
+            filtered.reserve(peers.size());
+            std::unordered_set<std::string> seen;
+            for (const auto& d : peers) {
+                if (d.peer_id.empty()) continue;
+                if (d.peer_id == self_.peer_id) continue;
+                if (d.peer_id == owner) continue;
+                if (!seen.insert(d.peer_id).second) continue;
+                filtered.push_back(d);
+            }
+            std::sort(filtered.begin(), filtered.end(), [](const auto& a, const auto& b) {
+                return a.peer_id < b.peer_id;
+            });
+            peers = std::move(filtered);
+        };
+
+        normalize_neighbors(it->first, it->second.neighbors);
+        for (auto& snap : it->second.snapshots) {
+            normalize_neighbors(it->first, snap.neighbors);
         }
-        std::sort(next.begin(), next.end(), [](const auto& a, const auto& b) {
-            return a.peer_id < b.peer_id;
+        std::sort(it->second.snapshots.begin(), it->second.snapshots.end(), [](const TwoHopSnapshot& a, const TwoHopSnapshot& b) {
+            return a.term < b.term;
         });
-        it->second.neighbors = std::move(next);
+        if (!it->second.snapshots.empty()) {
+            it->second.neighbors = it->second.snapshots.back().neighbors;
+        }
         ++it;
     }
 }
@@ -570,7 +694,8 @@ void DraughtsNode::update_active_neighbors_file(bool force) {
             oss << peers[i];
         }
         oss << "}";
-        logger_.info("active邻居变更 term=" + std::to_string(topod_term_) + " " + oss.str());
+        logger_.info("active邻居变更 self=" + self_.peer_id +
+                     " term=" + std::to_string(topod_term_) + " " + oss.str());
 
         active_neighbor_set_ = std::move(current);
     }
@@ -735,7 +860,13 @@ bool DraughtsNode::load_static_topology() {
             learn_peer(d);
         }
         if (!neighbor_id.empty()) {
-            twohop_[neighbor_id] = TwoHopEntry{nnh_descs};
+            TwoHopEntry entry{};
+            entry.neighbors = nnh_descs;
+            TwoHopSnapshot snap{};
+            snap.term = 0;
+            snap.neighbors = nnh_descs;
+            entry.snapshots.push_back(std::move(snap));
+            twohop_[neighbor_id] = std::move(entry);
         }
     }
 

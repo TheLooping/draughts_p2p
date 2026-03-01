@@ -10,6 +10,16 @@ SKIP_LIST=""
 ONLY_LIST=""
 INTERVAL=5
 
+spawn_detached() {
+  local out="$1"
+  shift
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$@" > "$out" 2>&1 < /dev/null &
+  else
+    "$@" > "$out" 2>&1 &
+  fi
+}
+
 usage() {
   cat <<EOF2
 Usage: $0 [--configs-dir DIR] [--binary PATH] [--run-dir DIR] [--seed-count N] [--seed-delay SEC] [--skip name1,name2] [--only name1,name2] [--interval SEC]
@@ -99,7 +109,7 @@ start_cfg() {
   local name
   name=$(basename "$cfg" .conf)
   local out="$RUN_DIR/$name.out"
-  ( exec -a ChatCore "$BINARY" "$cfg" ) > "$out" 2>&1 &
+  spawn_detached "$out" "$BINARY" "$cfg"
   echo "$! $cfg" >> "$PID_FILE"
   echo "started $cfg (pid=$!)"
 }

@@ -63,6 +63,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--active-min", type=int, default=3, help="minimum active neighbors / degree")
     p.add_argument("--active-max", type=int, default=5, help="maximum active neighbors / degree")
     p.add_argument("--topod-bootstrap", type=int, default=3, help="bootstrap peers each TopoDaemon can use")
+    p.add_argument("--log-level", default="info", choices=["detail", "debug", "info", "warn", "error"],
+                   help="ChatCore log level for generated configs")
     p.add_argument("--force-keys", action="store_true", help="overwrite existing key files")
     p.add_argument("--seed", type=int, default=None, help="random seed for topology generation")
     return p.parse_args()
@@ -345,7 +347,7 @@ def main() -> None:
             overlay_port=overlay_port,
             draughts_port=draughts_port,
             log_file=log_file.as_posix(),
-            log_level="info",
+            log_level=args.log_level,
             cli_enabled=cli_enabled,
             neighbors_file=neighbors_file.as_posix(),
             self_info_file=self_info_file.as_posix(),

@@ -111,7 +111,8 @@ private:
 
     bool send_packet_to(const draughts::DraughtsPacket& p,
                         const boost::asio::ip::address_v4& addr,
-                        uint16_t port);
+                        uint16_t port,
+                        const std::string& stage = "");
 
     bool pick_nh_nnh(boost::asio::ip::address_v4& nh_addr,
                      uint16_t& nh_port,
@@ -123,11 +124,10 @@ private:
                      const std::string& exclude_peer_id);
     bool pick_nnh_for_peer_id(const std::string& nh_peer_id,
                               const std::string& exclude_peer_id,
-                              std::uint64_t topo_term,
+                              std::uint64_t& topo_term,
                               boost::asio::ip::address_v4& nnh_addr,
                               uint16_t& nnh_port,
-                              draughts::crypto::PubKey& nnh_pub,
-                              bool strict_from_nh_neighbors = false);
+                              draughts::crypto::PubKey& nnh_pub);
 
     static std::string session_hex(const std::string& sid);
     static bool parse_session_hex(const std::string& session_hex, std::string& sid);

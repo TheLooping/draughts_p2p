@@ -292,6 +292,19 @@ func (r *snapshotRing) Get(term uint64) (NeighborSnapshot, bool) {
 	return s, true
 }
 
+func (r *snapshotRing) Floor(term uint64) (NeighborSnapshot, bool) {
+	if term == 0 || len(r.order) == 0 {
+		return NeighborSnapshot{}, false
+	}
+	idx := sort.Search(len(r.order), func(i int) bool {
+		return r.order[i] > term
+	})
+	if idx == 0 {
+		return NeighborSnapshot{}, false
+	}
+	return r.Get(r.order[idx-1])
+}
+
 func (r *snapshotRing) Latest() (NeighborSnapshot, bool) {
 	if len(r.order) == 0 {
 		return NeighborSnapshot{}, false
@@ -299,12 +312,93 @@ func (r *snapshotRing) Latest() (NeighborSnapshot, bool) {
 	return r.Get(r.order[len(r.order)-1])
 }
 
+func (r *snapshotRing) Terms() []uint64 {
+	out := make([]uint64, len(r.order))
+	copy(out, r.order)
+	return out
+}
+
+func (r *snapshotRing) Entries() []NeighborSnapshot {
+	out := make([]NeighborSnapshot, 0, len(r.order))
+	for _, term := range r.order {
+		if snap, ok := r.Get(term); ok {
+			out = append(out, snap)
+		}
+	}
+	return out
+}
+
+type persistedNeighborTermView struct {
+	Term   uint64           `json:"term"`
+	Active []PeerDescriptor `json:"active"`
+}
+
+type persistedActiveNeighbor struct {
+	PeerDescriptor
+	Snapshots []persistedNeighborTermView `json:"snapshots,omitempty"`
+}
+
 type persistedRecord struct {
-	Scope       string           `json:"scope"`
-	OwnerPeerID string           `json:"owner_peer_id"`
-	Term        uint64           `json:"term"`
-	Active      []PeerDescriptor `json:"active"`
-	TimestampMs int64            `json:"timestamp_ms"`
+	Scope       string                                 `json:"scope"`
+	OwnerPeerID string                                 `json:"owner_peer_id"`
+	Term        uint64                                 `json:"term"`
+	Active      []persistedActiveNeighbor              `json:"active"`
+	TimestampMs int64                                  `json:"timestamp_ms"`
+	TwoHop      map[string][]persistedNeighborTermView `json:"twohop,omitempty"`
+}
+
+type twoHopTermView struct {
+	OwnerPeerID string                    `json:"owner_peer_id"`
+	Term        uint64                    `json:"term"`
+	Active      []persistedActiveNeighbor `json:"active"`
+	TimestampMs int64                     `json:"timestamp_ms"`
+}
+
+func peersToPersistedActive(peers []PeerDescriptor) []persistedActiveNeighbor {
+	base := clonePeers(peers)
+	out := make([]persistedActiveNeighbor, 0, len(base))
+	for _, p := range base {
+		out = append(out, persistedActiveNeighbor{PeerDescriptor: p})
+	}
+	return out
+}
+
+func persistedActiveToPeers(rows []persistedActiveNeighbor) []PeerDescriptor {
+	out := make([]PeerDescriptor, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.PeerDescriptor.Clone())
+	}
+	return clonePeers(out)
+}
+
+func snapshotsToPersistedViews(snaps []NeighborSnapshot) []persistedNeighborTermView {
+	if len(snaps) == 0 {
+		return nil
+	}
+	views := append([]NeighborSnapshot{}, snaps...)
+	sort.Slice(views, func(i, j int) bool {
+		if views[i].Term == views[j].Term {
+			return views[i].TimestampMs < views[j].TimestampMs
+		}
+		return views[i].Term < views[j].Term
+	})
+
+	rows := make([]persistedNeighborTermView, 0, len(views))
+	for _, v := range views {
+		if v.Term == 0 {
+			continue
+		}
+		rows = append(rows, persistedNeighborTermView{
+			Term:   v.Term,
+			Active: clonePeers(v.Active),
+		})
+	}
+	return rows
+}
+
+func isSelfTermScope(scope string) bool {
+	scope = strings.TrimSpace(scope)
+	return scope == "" || scope == "self_term"
 }
 
 type historyStore struct {
@@ -323,24 +417,49 @@ func newHistoryStore(path string) (*historyStore, error) {
 }
 
 func (s *historyStore) Append(scope string, snap NeighborSnapshot) error {
+	return s.AppendWithTwoHop(scope, snap, nil)
+}
+
+func (s *historyStore) AppendWithTwoHop(scope string, snap NeighborSnapshot, twohop map[string][]NeighborSnapshot) error {
+	if !isSelfTermScope(scope) {
+		// History file keeps only finalized self-term views.
+		return nil
+	}
 	if snap.OwnerPeerID == "" || snap.Term == 0 {
 		return nil
 	}
 	rec := persistedRecord{
-		Scope:       scope,
+		Scope:       "self_term",
 		OwnerPeerID: snap.OwnerPeerID,
 		Term:        snap.Term,
-		Active:      clonePeers(snap.Active),
+		Active:      peersToPersistedActive(snap.Active),
 		TimestampMs: snap.TimestampMs,
 	}
+	if len(twohop) > 0 {
+		for i := range rec.Active {
+			owner := strings.TrimSpace(rec.Active[i].PeerID)
+			if owner == "" {
+				continue
+			}
+			rec.Active[i].Snapshots = snapshotsToPersistedViews(twohop[owner])
+		}
+	}
 
-	data, err := json.Marshal(rec)
+	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		return err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	exists, err := s.hasSelfTermLocked(rec.OwnerPeerID, rec.Term)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
 
 	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -349,6 +468,68 @@ func (s *historyStore) Append(scope string, snap NeighborSnapshot) error {
 	defer f.Close()
 
 	if _, err := f.Write(append(data, '\n')); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *historyStore) hasSelfTermLocked(owner string, term uint64) (bool, error) {
+	f, err := os.Open(s.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer f.Close()
+
+	dec := json.NewDecoder(f)
+	for {
+		var rec persistedRecord
+		if err := dec.Decode(&rec); err != nil {
+			if errors.Is(err, io.EOF) {
+				return false, nil
+			}
+			return false, err
+		}
+		if rec.OwnerPeerID != owner || rec.Term != term || !isSelfTermScope(rec.Scope) {
+			continue
+		}
+		return true, nil
+	}
+}
+
+func (s *historyStore) Rewrite(records []persistedRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tmpPath := s.path + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+
+	writeErr := func(err error) error {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+
+	for _, rec := range records {
+		data, err := json.MarshalIndent(rec, "", "  ")
+		if err != nil {
+			return writeErr(err)
+		}
+		if _, err := f.Write(append(data, '\n')); err != nil {
+			return writeErr(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, s.path); err != nil {
+		_ = os.Remove(tmpPath)
 		return err
 	}
 	return nil
@@ -368,23 +549,19 @@ func (s *historyStore) LoadAll() ([]persistedRecord, error) {
 	defer f.Close()
 
 	out := make([]persistedRecord, 0)
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
+	dec := json.NewDecoder(f)
+	for {
 		var rec persistedRecord
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			continue
+		if err := dec.Decode(&rec); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
 		}
 		if rec.OwnerPeerID == "" || rec.Term == 0 {
 			continue
 		}
 		out = append(out, rec)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
 	}
 	return out, nil
 }
@@ -407,29 +584,203 @@ func (s *historyStore) Lookup(owner string, term uint64) (*NeighborSnapshot, err
 	defer f.Close()
 
 	var found *NeighborSnapshot
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+	dec := json.NewDecoder(f)
+	for {
+		var rec persistedRecord
+		if err := dec.Decode(&rec); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+		if !isSelfTermScope(rec.Scope) {
 			continue
 		}
+		if rec.OwnerPeerID == owner && rec.Term == term {
+			snap := NeighborSnapshot{
+				OwnerPeerID: rec.OwnerPeerID,
+				Term:        rec.Term,
+				Active:      persistedActiveToPeers(rec.Active),
+				TimestampMs: rec.TimestampMs,
+			}
+			found = &snap
+			continue
+		}
+		for _, row := range rec.Active {
+			if row.PeerID != owner {
+				continue
+			}
+			for _, view := range row.Snapshots {
+				if view.Term != term {
+					continue
+				}
+				snap := NeighborSnapshot{
+					OwnerPeerID: owner,
+					Term:        view.Term,
+					Active:      clonePeers(view.Active),
+					TimestampMs: rec.TimestampMs,
+				}
+				found = &snap
+			}
+		}
+	}
+	return found, nil
+}
+
+func (s *historyStore) LookupFloor(owner string, term uint64) (*NeighborSnapshot, error) {
+	if owner == "" || term == 0 {
+		return nil, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	f, err := os.Open(s.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	var found *NeighborSnapshot
+	dec := json.NewDecoder(f)
+	for {
 		var rec persistedRecord
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+		if err := dec.Decode(&rec); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+		if !isSelfTermScope(rec.Scope) {
+			continue
+		}
+		if rec.OwnerPeerID == owner && rec.Term != 0 && rec.Term <= term {
+			if found == nil || found.Term < rec.Term || (found.Term == rec.Term && found.TimestampMs <= rec.TimestampMs) {
+				snap := NeighborSnapshot{
+					OwnerPeerID: rec.OwnerPeerID,
+					Term:        rec.Term,
+					Active:      persistedActiveToPeers(rec.Active),
+					TimestampMs: rec.TimestampMs,
+				}
+				found = &snap
+			}
+		}
+		for _, row := range rec.Active {
+			if row.PeerID != owner {
+				continue
+			}
+			for _, view := range row.Snapshots {
+				if view.Term == 0 || view.Term > term {
+					continue
+				}
+				if found == nil || found.Term < view.Term || (found.Term == view.Term && found.TimestampMs <= rec.TimestampMs) {
+					snap := NeighborSnapshot{
+						OwnerPeerID: owner,
+						Term:        view.Term,
+						Active:      clonePeers(view.Active),
+						TimestampMs: rec.TimestampMs,
+					}
+					found = &snap
+				}
+			}
+		}
+	}
+	return found, nil
+}
+
+func clonePersistedViews(rows []persistedNeighborTermView, maxTerm uint64) []persistedNeighborTermView {
+	out := make([]persistedNeighborTermView, 0, len(rows))
+	for _, row := range rows {
+		if row.Term == 0 {
+			continue
+		}
+		if maxTerm > 0 && row.Term > maxTerm {
+			continue
+		}
+		out = append(out, persistedNeighborTermView{
+			Term:   row.Term,
+			Active: clonePeers(row.Active),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Term == out[j].Term {
+			return len(out[i].Active) < len(out[j].Active)
+		}
+		return out[i].Term < out[j].Term
+	})
+	return out
+}
+
+func clonePersistedActiveRows(rows []persistedActiveNeighbor, twohop map[string][]persistedNeighborTermView, maxTerm uint64) []persistedActiveNeighbor {
+	out := make([]persistedActiveNeighbor, 0, len(rows))
+	for _, row := range rows {
+		owner := strings.TrimSpace(row.PeerID)
+		if owner == "" {
+			continue
+		}
+		cloned := persistedActiveNeighbor{
+			PeerDescriptor: row.PeerDescriptor.Clone(),
+		}
+		views := row.Snapshots
+		if len(views) == 0 && len(twohop) > 0 {
+			views = twohop[owner]
+		}
+		cloned.Snapshots = clonePersistedViews(views, maxTerm)
+		out = append(out, cloned)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].PeerID < out[j].PeerID
+	})
+	return out
+}
+
+func (s *historyStore) LookupSelfTermView(owner string, term uint64) (*twoHopTermView, error) {
+	if owner == "" || term == 0 {
+		return nil, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	f, err := os.Open(s.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	var found *twoHopTermView
+	dec := json.NewDecoder(f)
+	for {
+		var rec persistedRecord
+		if err := dec.Decode(&rec); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+		if !isSelfTermScope(rec.Scope) {
 			continue
 		}
 		if rec.OwnerPeerID != owner || rec.Term != term {
 			continue
 		}
-		snap := NeighborSnapshot{
+
+		view := twoHopTermView{
 			OwnerPeerID: rec.OwnerPeerID,
 			Term:        rec.Term,
-			Active:      clonePeers(rec.Active),
+			Active:      clonePersistedActiveRows(rec.Active, rec.TwoHop, term),
 			TimestampMs: rec.TimestampMs,
 		}
-		found = &snap
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+		if found == nil || found.TimestampMs <= view.TimestampMs {
+			v := view
+			found = &v
+		}
 	}
 	return found, nil
 }
@@ -463,6 +814,7 @@ type daemon struct {
 	selfHistory     *snapshotRing
 	neighborHistory map[string]*snapshotRing
 	historyMeta     map[string]int64
+	flushedSelfTerm map[uint64]struct{}
 
 	randMu sync.Mutex
 	rnd    *rand.Rand
@@ -508,6 +860,7 @@ func newDaemon(cfg Config) (*daemon, error) {
 		selfHistory:     newSnapshotRing(cfg.SnapshotLimit),
 		neighborHistory: make(map[string]*snapshotRing),
 		historyMeta:     make(map[string]int64),
+		flushedSelfTerm: make(map[uint64]struct{}),
 		rnd:             rand.New(rand.NewSource(time.Now().UnixNano())),
 		ctx:             ctx,
 		cancel:          cancel,
@@ -528,9 +881,6 @@ func newDaemon(cfg Config) (*daemon, error) {
 		snap := d.buildSelfSnapshotLocked(d.term)
 		d.selfHistory.Put(snap)
 		d.historyMeta[d.self.PeerID] = nowMs()
-		if err := d.store.Append("self", snap); err != nil {
-			tdWarnf("History 持久化", "append initial self snapshot failed [err=%v]", err)
-		}
 	}
 	d.mu.Unlock()
 
@@ -610,23 +960,105 @@ func (d *daemon) loadPersistedCache() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	selfTermByTerm := make(map[uint64]persistedRecord)
+	selfTermCount := 0
+	needCompact := false
+
 	for _, rec := range recs {
-		snap := NeighborSnapshot{
+		if rec.OwnerPeerID != d.self.PeerID || rec.Term == 0 {
+			needCompact = true
+			continue
+		}
+		if !isSelfTermScope(rec.Scope) {
+			needCompact = true
+			continue
+		}
+		selfTermCount++
+		if _, exists := selfTermByTerm[rec.Term]; exists {
+			needCompact = true
+		}
+		rec.Scope = "self_term"
+		selfTermByTerm[rec.Term] = rec
+	}
+
+	if len(selfTermByTerm) == 0 {
+		// Backward compatibility with old history format.
+		for _, rec := range recs {
+			if rec.OwnerPeerID == "" || rec.Term == 0 {
+				continue
+			}
+			snap := NeighborSnapshot{
+				OwnerPeerID: rec.OwnerPeerID,
+				Term:        rec.Term,
+				Active:      persistedActiveToPeers(rec.Active),
+				TimestampMs: rec.TimestampMs,
+			}
+			if snap.OwnerPeerID == d.self.PeerID {
+				d.selfHistory.Put(snap)
+				if snap.Term > d.term {
+					d.term = snap.Term
+				}
+			} else {
+				ring := d.ensureNeighborRingLocked(snap.OwnerPeerID)
+				ring.Put(snap)
+			}
+			d.historyMeta[snap.OwnerPeerID] = max64(d.historyMeta[snap.OwnerPeerID], snap.TimestampMs)
+		}
+		return nil
+	}
+
+	terms := make([]uint64, 0, len(selfTermByTerm))
+	for term := range selfTermByTerm {
+		terms = append(terms, term)
+	}
+	sort.Slice(terms, func(i, j int) bool { return terms[i] < terms[j] })
+
+	canonical := make([]persistedRecord, 0, len(terms))
+	for _, term := range terms {
+		rec := selfTermByTerm[term]
+		canonical = append(canonical, rec)
+
+		selfSnap := NeighborSnapshot{
 			OwnerPeerID: rec.OwnerPeerID,
 			Term:        rec.Term,
-			Active:      clonePeers(rec.Active),
+			Active:      persistedActiveToPeers(rec.Active),
 			TimestampMs: rec.TimestampMs,
 		}
-		if snap.OwnerPeerID == d.self.PeerID {
-			d.selfHistory.Put(snap)
-			if snap.Term > d.term {
-				d.term = snap.Term
-			}
-		} else {
-			ring := d.ensureNeighborRingLocked(snap.OwnerPeerID)
-			ring.Put(snap)
+		d.selfHistory.Put(selfSnap)
+		d.flushedSelfTerm[rec.Term] = struct{}{}
+		if selfSnap.Term > d.term {
+			d.term = selfSnap.Term
 		}
-		d.historyMeta[snap.OwnerPeerID] = max64(d.historyMeta[snap.OwnerPeerID], snap.TimestampMs)
+		d.historyMeta[d.self.PeerID] = max64(d.historyMeta[d.self.PeerID], selfSnap.TimestampMs)
+
+		for _, row := range rec.Active {
+			owner := strings.TrimSpace(row.PeerID)
+			if owner == "" || owner == d.self.PeerID {
+				continue
+			}
+			ring := d.ensureNeighborRingLocked(owner)
+			for _, view := range row.Snapshots {
+				if view.Term == 0 {
+					continue
+				}
+				neighborSnap := NeighborSnapshot{
+					OwnerPeerID: owner,
+					Term:        view.Term,
+					Active:      clonePeers(view.Active),
+					TimestampMs: rec.TimestampMs,
+				}
+				ring.Put(neighborSnap)
+				d.historyMeta[owner] = max64(d.historyMeta[owner], neighborSnap.TimestampMs)
+			}
+		}
+	}
+
+	if needCompact || selfTermCount != len(selfTermByTerm) || len(recs) != len(canonical) {
+		if err := d.store.Rewrite(canonical); err != nil {
+			tdWarnf("History 持久化", "compact history failed [err=%v]", err)
+		} else {
+			tdInfof("History 持久化", "history compacted to self_term only [records=%d]", len(canonical))
+		}
 	}
 
 	return nil
@@ -774,6 +1206,10 @@ func (d *daemon) stop(ctx context.Context) {
 	case <-ctx.Done():
 		tdWarnf("Lifecycle 生命周期", "shutdown timeout (graceful stop timed out)")
 	}
+
+	d.mu.Lock()
+	d.flushSelfTermViewLocked(d.term, "shutdown")
+	d.mu.Unlock()
 }
 
 func (d *daemon) serveOverlay() {
@@ -945,10 +1381,6 @@ func (d *daemon) handleSnapshot(msg overlayMessage) {
 	d.historyMeta[from.PeerID] = nowMs()
 	d.gcNeighborHistoryLocked()
 	d.mu.Unlock()
-
-	if err := d.store.Append("twohop", incoming); err != nil {
-		tdWarnf("History 持久化", "persist twohop snapshot failed [owner=%s] [term=%d] [err=%v]", from.PeerID, msg.Term, err)
-	}
 }
 
 func (d *daemon) handleShuffle(msg overlayMessage) overlayMessage {
@@ -1542,13 +1974,13 @@ func (d *daemon) samplePassiveLocked(limit int, excludeIDs ...string) []PeerDesc
 }
 
 func (d *daemon) advanceTermLocked(reason string) {
+	prevTerm := d.term
+	d.flushSelfTermViewLocked(prevTerm, "term_advance:"+reason)
+
 	d.term++
 	snap := d.buildSelfSnapshotLocked(d.term)
 	d.selfHistory.Put(snap)
 	d.historyMeta[d.self.PeerID] = nowMs()
-	if err := d.store.Append("self", snap); err != nil {
-		tdWarnf("History 持久化", "persist self snapshot failed [term=%d] [err=%v]", snap.Term, err)
-	}
 	d.gcNeighborHistoryLocked()
 
 	activeIDs := make([]string, 0, len(snap.Active))
@@ -1556,6 +1988,120 @@ func (d *daemon) advanceTermLocked(reason string) {
 		activeIDs = append(activeIDs, p.PeerID)
 	}
 	tdInfof("Overlay 邻居", "ACTIVE_CHANGED [term=%d] [reason=%s] [neighbors=%s]", d.term, reason, formatNodeSet(activeIDs))
+}
+
+func activeOwnerIDsFromPeers(peers []PeerDescriptor, selfID string) []string {
+	owners := make([]string, 0, len(peers))
+	seen := make(map[string]struct{}, len(peers))
+	for _, p := range peers {
+		owner := strings.TrimSpace(p.PeerID)
+		if owner == "" || owner == selfID {
+			continue
+		}
+		if _, ok := seen[owner]; ok {
+			continue
+		}
+		seen[owner] = struct{}{}
+		owners = append(owners, owner)
+	}
+	sort.Strings(owners)
+	return owners
+}
+
+func snapshotEntriesAtOrBeforeTerm(ring *snapshotRing, maxTerm uint64) []NeighborSnapshot {
+	if ring == nil || maxTerm == 0 {
+		return nil
+	}
+	entries := ring.Entries()
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]NeighborSnapshot, 0, len(entries))
+	for _, snap := range entries {
+		if snap.Term == 0 || snap.Term > maxTerm {
+			continue
+		}
+		out = append(out, snap)
+	}
+	return out
+}
+
+func (d *daemon) cloneTwoHopForOwnerIDsLocked(owners []string, term uint64) map[string][]NeighborSnapshot {
+	out := make(map[string][]NeighborSnapshot, len(owners))
+	for _, owner := range owners {
+		if owner == "" || owner == d.self.PeerID {
+			continue
+		}
+		ring := d.neighborHistory[owner]
+		if ring == nil {
+			out[owner] = nil
+			continue
+		}
+		out[owner] = snapshotEntriesAtOrBeforeTerm(ring, term)
+	}
+	return out
+}
+
+func (d *daemon) flushSelfTermViewLocked(term uint64, reason string) {
+	if term == 0 {
+		return
+	}
+	if _, ok := d.flushedSelfTerm[term]; ok {
+		return
+	}
+
+	snap, ok := d.selfHistory.Get(term)
+	if !ok {
+		persisted, err := d.store.Lookup(d.self.PeerID, term)
+		if err != nil {
+			tdWarnf("History 持久化", "load self term snapshot failed [term=%d] [reason=%s] [err=%v]", term, reason, err)
+			return
+		}
+		if persisted == nil {
+			tdWarnf("History 持久化", "skip self_term persist [term=%d] [reason=%s] [detail=self_snapshot_missing]", term, reason)
+			return
+		}
+		snap = *persisted
+	}
+
+	owners := activeOwnerIDsFromPeers(snap.Active, d.self.PeerID)
+	twohop := d.cloneTwoHopForOwnerIDsLocked(owners, term)
+	if err := d.store.AppendWithTwoHop("self_term", snap, twohop); err != nil {
+		tdWarnf("History 持久化", "persist self_term snapshot failed [term=%d] [owners=%d] [reason=%s] [err=%v]", term, len(owners), reason, err)
+		return
+	}
+
+	d.flushedSelfTerm[term] = struct{}{}
+	tdInfof("History 持久化", "persist self_term snapshot [term=%d] [owners=%d] [reason=%s]", term, len(owners), reason)
+}
+
+func (d *daemon) buildTwoHopTermViewLocked(term uint64) twoHopTermView {
+	activePeers := make([]PeerDescriptor, 0, len(d.active))
+	for _, p := range d.active {
+		if p.PeerID == "" || p.PeerID == d.self.PeerID {
+			continue
+		}
+		activePeers = append(activePeers, p.Clone())
+	}
+	activePeers = clonePeers(activePeers)
+
+	active := make([]persistedActiveNeighbor, 0, len(activePeers))
+	for _, p := range activePeers {
+		entry := persistedActiveNeighbor{
+			PeerDescriptor: p,
+		}
+		if ring := d.neighborHistory[p.PeerID]; ring != nil {
+			entry.Snapshots = snapshotsToPersistedViews(snapshotEntriesAtOrBeforeTerm(ring, term))
+		}
+		active = append(active, entry)
+	}
+
+	return twoHopTermView{
+		OwnerPeerID: d.self.PeerID,
+		Term:        term,
+		Active:      active,
+		TimestampMs: nowMs(),
+	}
 }
 
 func (d *daemon) buildSelfSnapshotLocked(term uint64) NeighborSnapshot {
@@ -1720,8 +2266,7 @@ func (d *daemon) processIPC(line string) string {
 			return "ERR reason=invalid_term"
 		}
 		exclude := strings.TrimSpace(kv["exclude"])
-		strict := parseBool01(kv["strict"])
-		return d.handleIPCHistory(peer, term, exclude, strict)
+		return d.handleIPCPick(peer, term, exclude)
 	default:
 		tdWarnf("IPC 调用", "unknown command [raw=%q]", line)
 		return "ERR reason=unknown_command"
@@ -1747,11 +2292,6 @@ func parseCommand(line string) (string, map[string]string) {
 	return cmd, kv
 }
 
-func parseBool01(s string) bool {
-	s = strings.TrimSpace(strings.ToLower(s))
-	return s == "1" || s == "true" || s == "yes"
-}
-
 func (d *daemon) handleIPCState() string {
 	d.mu.RLock()
 	term := d.term
@@ -1767,41 +2307,37 @@ func (d *daemon) handleIPCState() string {
 }
 
 func (d *daemon) handleIPCTwoHop() string {
-	type latestSnapshot struct {
-		owner string
-		snap  NeighborSnapshot
-		ok    bool
-	}
-
 	d.mu.RLock()
 	term := d.term
 	selfID := d.self.PeerID
 	activeIDs := make([]string, 0, len(d.active))
-	latest := make(map[string]latestSnapshot, len(d.active))
-	for peerID := range d.active {
-		activeIDs = append(activeIDs, peerID)
-		if ring := d.neighborHistory[peerID]; ring != nil {
+	latestByOwner := make(map[string]NeighborSnapshot, len(d.active))
+	for owner := range d.active {
+		if owner == "" || owner == selfID {
+			continue
+		}
+		activeIDs = append(activeIDs, owner)
+		if ring := d.neighborHistory[owner]; ring != nil {
 			if snap, ok := ring.Latest(); ok {
-				latest[peerID] = latestSnapshot{owner: peerID, snap: snap, ok: true}
-				continue
+				latestByOwner[owner] = snap
 			}
 		}
-		latest[peerID] = latestSnapshot{owner: peerID, ok: false}
 	}
 	d.mu.RUnlock()
 
 	sort.Strings(activeIDs)
 	parts := make([]string, 0, len(activeIDs))
+	entryCount := 0
 	for _, owner := range activeIDs {
-		rec, ok := latest[owner]
-		if !ok || !rec.ok {
-			parts = append(parts, owner+">")
+		snap, ok := latestByOwner[owner]
+		if !ok || snap.Term == 0 {
+			parts = append(parts, owner+"(term=0)>")
 			continue
 		}
 
-		seen := make(map[string]struct{}, len(rec.snap.Active))
-		nnhIDs := make([]string, 0, len(rec.snap.Active))
-		for _, p := range rec.snap.Active {
+		seen := make(map[string]struct{}, len(snap.Active))
+		nnhIDs := make([]string, 0, len(snap.Active))
+		for _, p := range snap.Active {
 			pid := strings.TrimSpace(p.PeerID)
 			if pid == "" || pid == selfID || pid == owner {
 				continue
@@ -1813,10 +2349,11 @@ func (d *daemon) handleIPCTwoHop() string {
 			nnhIDs = append(nnhIDs, pid)
 		}
 		sort.Strings(nnhIDs)
-		parts = append(parts, owner+">"+strings.Join(nnhIDs, ","))
+		parts = append(parts, fmt.Sprintf("%s(term=%d)>%s", owner, snap.Term, strings.Join(nnhIDs, ",")))
+		entryCount++
 	}
 
-	tdInfof("IPC 调用", "TWOHOP result [term=%d] [active=%s] [owners=%d]", term, formatNodeSet(activeIDs), len(activeIDs))
+	tdInfof("IPC 调用", "TWOHOP result [term=%d] [active=%s] [owners=%d] [entries=%d]", term, formatNodeSet(activeIDs), len(activeIDs), entryCount)
 	return fmt.Sprintf("OK term=%d active=%s twohop=%s", term, strings.Join(activeIDs, ","), strings.Join(parts, ";"))
 }
 
@@ -1830,7 +2367,6 @@ func (d *daemon) handleIPCPlan(exclude string) string {
 
 	d.mu.RLock()
 	selfID := d.self.PeerID
-	localTerm := d.term
 
 	nhs := make([]nhEntry, 0, len(d.active))
 	for _, p := range d.active {
@@ -1846,11 +2382,6 @@ func (d *daemon) handleIPCPlan(exclude string) string {
 		}
 		nhs = append(nhs, entry)
 	}
-
-	localActive := make([]PeerDescriptor, 0, len(d.active))
-	for _, p := range d.active {
-		localActive = append(localActive, p.Clone())
-	}
 	d.mu.RUnlock()
 
 	if len(nhs) == 0 {
@@ -1864,7 +2395,10 @@ func (d *daemon) handleIPCPlan(exclude string) string {
 	d.randMu.Unlock()
 
 	for _, item := range nhs {
-		if item.latestSnap == nil {
+		if !item.peer.ValidForRoute() {
+			continue
+		}
+		if item.latestSnap == nil || item.latestSnap.Term == 0 {
 			continue
 		}
 
@@ -1876,172 +2410,278 @@ func (d *daemon) handleIPCPlan(exclude string) string {
 		if !ok {
 			continue
 		}
-
-		if !item.peer.ValidForRoute() || !nnh.ValidForRoute() {
+		if !nnh.ValidForRoute() {
 			continue
-		}
-
-		term := item.latestSnap.Term
-		if term == 0 {
-			term = localTerm
-		}
-		if term == 0 {
-			term = 1
 		}
 
 		tdInfof(
 			"IPC 调用",
-			"PLAN result [exclude=%q] [term=%d] [nh=%s] [nh_neighbors=%s] [nnh=%s] [source=history]",
+			"PLAN result [exclude=%q] [term=%d] [nh=%s] [nh_neighbors=%s] [nnh=%s] [source=nh_latest_snapshot]",
 			exclude,
-			term,
+			item.latestSnap.Term,
 			item.peer.PeerID,
 			formatNodeSet(peerIDs(item.latestSnap.Active)),
 			nnh.PeerID,
 		)
-		return formatPlanResponse(term, item.peer, nnh)
+		return formatPlanResponse(item.latestSnap.Term, item.peer, nnh)
 	}
 
-	// Fallback: pick NNH from our local active view and synthesize history for NH.
-	for _, item := range nhs {
-		nnh, ok := pickCandidate(localActive, map[string]struct{}{
-			selfID:           {},
-			item.peer.PeerID: {},
-			exclude:          {},
-		}, d)
-		if !ok {
-			continue
-		}
-		if !item.peer.ValidForRoute() || !nnh.ValidForRoute() {
-			continue
-		}
-
-		term := localTerm
-		if term == 0 {
-			term = 1
-		}
-
-		synthetic := NeighborSnapshot{
-			OwnerPeerID: item.peer.PeerID,
-			Term:        term,
-			Active:      filterPeers(localActive, map[string]struct{}{item.peer.PeerID: {}, selfID: {}}),
-			TimestampMs: nowMs(),
-		}
-		d.storeNeighborSnapshot(synthetic, true)
-
-		tdInfof(
-			"IPC 调用",
-			"PLAN result [exclude=%q] [term=%d] [nh=%s] [nh_neighbors=%s] [nnh=%s] [source=fallback_local_active]",
-			exclude,
-			term,
-			item.peer.PeerID,
-			formatNodeSet(peerIDs(synthetic.Active)),
-			nnh.PeerID,
-		)
-		return formatPlanResponse(term, item.peer, nnh)
-	}
-
-	tdWarnf("IPC 调用", "PLAN result [exclude=%q] [status=NOT_FOUND] [reason=no_nnh_candidate]", exclude)
-	return "NOT_FOUND reason=no_nnh_candidate"
+	tdWarnf("IPC 调用", "PLAN result [exclude=%q] [status=NOT_FOUND] [reason=no_nnh_in_nh_latest_snapshot]", exclude)
+	return "NOT_FOUND reason=no_nnh_in_nh_latest_snapshot"
 }
 
-func (d *daemon) handleIPCHistory(peerID string, term uint64, exclude string, strict bool) string {
-	tdInfof("IPC 调用", "HISTORY request [peer=%s] [term=%d] [exclude=%q] [strict=%t]", peerID, term, exclude, strict)
+func (d *daemon) handleIPCPick(peerID string, term uint64, exclude string) string {
+	tdInfof("IPC 调用", "PICK request [peer=%s] [term=%d] [exclude=%q]", peerID, term, exclude)
 
 	if peerID == "" || term == 0 {
-		tdWarnf("IPC 调用", "HISTORY result [peer=%s] [term=%d] [status=ERR] [reason=invalid_args]", peerID, term)
+		tdWarnf("IPC 调用", "PICK result [peer=%s] [term=%d] [status=ERR] [reason=invalid_args]", peerID, term)
 		return "ERR reason=invalid_args"
 	}
 
+	exclude = strings.TrimSpace(exclude)
 	selfID := d.self.PeerID
-	var (
-		snapFound bool
-		snap      NeighborSnapshot
-		localAct  []PeerDescriptor
-	)
 
 	d.mu.RLock()
-	if ring := d.neighborHistory[peerID]; ring != nil {
-		if s, ok := ring.Get(term); ok {
-			snap = s
-			snapFound = true
-		}
-	}
-	if !strict {
-		localAct = make([]PeerDescriptor, 0, len(d.active))
-		for _, p := range d.active {
-			localAct = append(localAct, p.Clone())
-		}
-	}
+	currentTerm := d.term
+	currentView := d.buildTwoHopTermViewLocked(currentTerm)
 	d.mu.RUnlock()
 
-	if !snapFound {
-		persisted, err := d.store.Lookup(peerID, term)
-		if err != nil {
-			tdWarnf("History 查询", "lookup failed [peer=%s] [term=%d] [err=%v]", peerID, term, err)
-		} else if persisted != nil {
-			snap = *persisted
-			snapFound = true
-			d.storeNeighborSnapshot(snap, false)
-		}
-	}
-
-	if snapFound {
-		nnh, ok := pickCandidate(snap.Active, map[string]struct{}{
-			selfID:  {},
-			peerID:  {},
-			exclude: {},
-		}, d)
-		if ok && nnh.ValidForRoute() {
-			tdInfof(
-				"IPC 调用",
-				"HISTORY result [peer=%s] [term=%d] [nnh=%s] [snapshot_neighbors=%s] [source=snapshot]",
-				peerID,
-				term,
-				nnh.PeerID,
-				formatNodeSet(peerIDs(snap.Active)),
-			)
-			return formatHistoryResponse(nnh)
-		}
-	}
-
-	if strict {
+	if term > currentTerm {
 		tdWarnf(
 			"IPC 调用",
-			"HISTORY result [peer=%s] [term=%d] [status=NOT_FOUND] [reason=no_candidate_in_snapshot] [snapshot_neighbors=%s]",
+			"PICK result [peer=%s] [term=%d] [status=ERR] [reason=term_in_future] [current_term=%d]",
 			peerID,
 			term,
-			formatNodeSet(peerIDs(snap.Active)),
+			currentTerm,
+		)
+		return "ERR reason=term_in_future"
+	}
+
+	var (
+		selfView    twoHopTermView
+		selfViewSrc = "none"
+		viewFound   bool
+	)
+
+	if term == currentTerm {
+		selfView = currentView
+		selfViewSrc = "self_live_view"
+		viewFound = true
+	} else {
+		view, err := d.store.LookupSelfTermView(selfID, term)
+		if err != nil {
+			tdWarnf("History 查询", "lookup self term view failed [term=%d] [err=%v]", term, err)
+		} else if view != nil {
+			selfView = *view
+			selfViewSrc = "self_store_term_view"
+			viewFound = true
+		}
+	}
+
+	if !viewFound {
+		tdWarnf(
+			"IPC 调用",
+			"PICK result [peer=%s] [term=%d] [status=NOT_FOUND] [reason=self_twohop_term_missing] [current_term=%d]",
+			peerID,
+			term,
+			currentTerm,
+		)
+		return "NOT_FOUND reason=self_twohop_term_missing"
+	}
+
+	selfActive := persistedActiveToPeers(selfView.Active)
+	selfActiveIDs := peerIDs(selfActive)
+
+	isActiveInTerm := false
+	nhRowIndex := -1
+	for i, row := range selfView.Active {
+		owner := strings.TrimSpace(row.PeerID)
+		if owner == "" {
+			continue
+		}
+		if owner == peerID {
+			isActiveInTerm = true
+			nhRowIndex = i
+			break
+		}
+	}
+	if !isActiveInTerm {
+		for _, p := range selfActive {
+			if strings.TrimSpace(p.PeerID) == peerID {
+				isActiveInTerm = true
+				break
+			}
+		}
+	}
+	if !isActiveInTerm {
+		tdWarnf(
+			"IPC 调用",
+			"PICK result [peer=%s] [term=%d] [status=NOT_FOUND] [reason=nh_not_in_term_active] [self_active=%s] [self_view_source=%s] [self_view_term=%d] [current_term=%d]",
+			peerID,
+			term,
+			formatNodeSet(selfActiveIDs),
+			selfViewSrc,
+			selfView.Term,
+			currentTerm,
+		)
+		return "NOT_FOUND reason=nh_not_in_term_active"
+	}
+
+	nhSnapshots := make([]NeighborSnapshot, 0)
+	nhSnapSrc := "term_view_row_snapshots"
+	if nhRowIndex >= 0 {
+		nhSnapshots = append(nhSnapshots,
+			persistedViewsToSnapshots(peerID, selfView.Active[nhRowIndex].Snapshots, selfView.TimestampMs)...)
+	}
+	if len(nhSnapshots) == 0 {
+		d.mu.RLock()
+		if ring := d.neighborHistory[peerID]; ring != nil {
+			cacheSnapsAll := ring.Entries()
+			cacheSnaps := make([]NeighborSnapshot, 0, len(cacheSnapsAll))
+			for _, snap := range cacheSnapsAll {
+				if snap.Term <= term {
+					cacheSnaps = append(cacheSnaps, snap)
+				}
+			}
+			switch {
+			case term < currentTerm:
+				nhSnapSrc = "nh_cache_floor_fallback"
+			case len(cacheSnaps) < len(cacheSnapsAll):
+				nhSnapSrc = "nh_cache_capped_by_req_term"
+			default:
+				nhSnapSrc = "nh_cache_latest_fallback"
+			}
+			nhSnapshots = append(nhSnapshots, cacheSnaps...)
+		} else {
+			nhSnapSrc = "nh_cache_missing"
+		}
+		d.mu.RUnlock()
+	}
+	nhSnapshots = normalizeSnapshotsByTerm(nhSnapshots)
+
+	tdInfof(
+		"IPC 调用",
+		"PICK detail [peer=%s] [req_term=%d] [current_term=%d] [self_view_term=%d] [self_view_source=%s] [self_active=%s] [nh_snapshot_source=%s] [nh_snapshots=%s]",
+		peerID,
+		term,
+		currentTerm,
+		selfView.Term,
+		selfViewSrc,
+		formatNodeSet(selfActiveIDs),
+		nhSnapSrc,
+		formatSnapshotsByTerm(nhSnapshots),
+	)
+
+	if len(nhSnapshots) == 0 {
+		tdWarnf(
+			"IPC 调用",
+			"PICK result [peer=%s] [term=%d] [status=NOT_FOUND] [reason=nh_snapshot_missing] [self_view_source=%s] [self_view_term=%d] [nh_snapshot_source=%s]",
+			peerID,
+			term,
+			selfViewSrc,
+			selfView.Term,
+			nhSnapSrc,
+		)
+		return "NOT_FOUND reason=nh_snapshot_missing"
+	}
+
+	excludeSet := map[string]struct{}{
+		selfID: {},
+		peerID: {},
+	}
+	if exclude != "" {
+		excludeSet[exclude] = struct{}{}
+	}
+
+	// 默认使用最新快照；若其没有可用候选，则向旧 term 回退，优先返回可路由候选。
+	selectedSnap := nhSnapshots[len(nhSnapshots)-1]
+	filteredCandidates := filterPeers(selectedSnap.Active, excludeSet)
+	validCandidates := make([]PeerDescriptor, 0, len(filteredCandidates))
+	for _, p := range filteredCandidates {
+		if p.ValidForRoute() {
+			validCandidates = append(validCandidates, p.Clone())
+		}
+	}
+	if len(validCandidates) == 0 {
+		for i := len(nhSnapshots) - 2; i >= 0; i-- {
+			candidateSnap := nhSnapshots[i]
+			candidateFiltered := filterPeers(candidateSnap.Active, excludeSet)
+			candidateValid := make([]PeerDescriptor, 0, len(candidateFiltered))
+			for _, p := range candidateFiltered {
+				if p.ValidForRoute() {
+					candidateValid = append(candidateValid, p.Clone())
+				}
+			}
+			if len(candidateValid) == 0 {
+				continue
+			}
+			selectedSnap = candidateSnap
+			filteredCandidates = candidateFiltered
+			validCandidates = candidateValid
+			break
+		}
+	}
+
+	tdInfof(
+		"IPC 调用",
+		"PICK candidate [peer=%s] [term=%d] [resolved_term=%d] [selected_snapshot_neighbors=%s] [exclude_effective=%s] [filtered_candidates=%s] [valid_candidates=%s]",
+		peerID,
+		term,
+		selectedSnap.Term,
+		formatNodeSet(peerIDs(selectedSnap.Active)),
+		formatExcludeSet(excludeSet),
+		formatNodeSet(peerIDs(filteredCandidates)),
+		formatNodeSet(peerIDs(validCandidates)),
+	)
+
+	if len(validCandidates) == 0 {
+		tdWarnf(
+			"IPC 调用",
+			"PICK result [peer=%s] [term=%d] [resolved_term=%d] [status=NOT_FOUND] [reason=no_candidate_in_snapshot] [selected_snapshot_neighbors=%s] [exclude_effective=%s] [self_view_source=%s] [nh_snapshot_source=%s]",
+			peerID,
+			term,
+			selectedSnap.Term,
+			formatNodeSet(peerIDs(selectedSnap.Active)),
+			formatExcludeSet(excludeSet),
+			selfViewSrc,
+			nhSnapSrc,
 		)
 		return "NOT_FOUND reason=no_candidate_in_snapshot"
 	}
 
-	nnh, ok := pickCandidate(localAct, map[string]struct{}{
-		selfID:  {},
-		peerID:  {},
-		exclude: {},
-	}, d)
+	nnh, ok := d.pickRandomPeer(validCandidates)
 	if !ok || !nnh.ValidForRoute() {
 		tdWarnf(
 			"IPC 调用",
-			"HISTORY result [peer=%s] [term=%d] [status=NOT_FOUND] [reason=no_fallback_candidate] [local_active=%s]",
+			"PICK result [peer=%s] [term=%d] [resolved_term=%d] [status=NOT_FOUND] [reason=no_candidate_in_snapshot] [selected_snapshot_neighbors=%s] [exclude_effective=%s] [self_view_source=%s] [nh_snapshot_source=%s]",
 			peerID,
 			term,
-			formatNodeSet(peerIDs(localAct)),
+			selectedSnap.Term,
+			formatNodeSet(peerIDs(selectedSnap.Active)),
+			formatExcludeSet(excludeSet),
+			selfViewSrc,
+			nhSnapSrc,
 		)
-		return "NOT_FOUND reason=no_fallback_candidate"
+		return "NOT_FOUND reason=no_candidate_in_snapshot"
 	}
+
 	tdInfof(
 		"IPC 调用",
-		"HISTORY result [peer=%s] [term=%d] [nnh=%s] [local_active=%s] [source=fallback_local_active]",
+		"PICK result [peer=%s] [term=%d] [resolved_term=%d] [nnh=%s] [self_active=%s] [selected_snapshot_neighbors=%s] [exclude_effective=%s] [self_view_source=%s] [nh_snapshot_source=%s]",
 		peerID,
 		term,
+		selectedSnap.Term,
 		nnh.PeerID,
-		formatNodeSet(peerIDs(localAct)),
+		formatNodeSet(selfActiveIDs),
+		formatNodeSet(peerIDs(selectedSnap.Active)),
+		formatExcludeSet(excludeSet),
+		selfViewSrc,
+		nhSnapSrc,
 	)
-	return formatHistoryResponse(nnh)
+	return formatPickResponse(selectedSnap.Term, nnh)
 }
 
-func (d *daemon) storeNeighborSnapshot(snap NeighborSnapshot, persist bool) {
+func (d *daemon) storeNeighborSnapshot(snap NeighborSnapshot) {
 	if snap.OwnerPeerID == "" || snap.Term == 0 {
 		return
 	}
@@ -2050,8 +2690,6 @@ func (d *daemon) storeNeighborSnapshot(snap NeighborSnapshot, persist bool) {
 		snap.TimestampMs = nowMs()
 	}
 
-	changed := false
-
 	d.mu.Lock()
 	ring := d.ensureNeighborRingLocked(snap.OwnerPeerID)
 	old, ok := ring.Get(snap.Term)
@@ -2059,15 +2697,8 @@ func (d *daemon) storeNeighborSnapshot(snap NeighborSnapshot, persist bool) {
 		ring.Put(snap)
 		d.historyMeta[snap.OwnerPeerID] = nowMs()
 		d.gcNeighborHistoryLocked()
-		changed = true
 	}
 	d.mu.Unlock()
-
-	if persist && changed {
-		if err := d.store.Append("twohop", snap); err != nil {
-			tdWarnf("History 持久化", "persist snapshot failed [peer=%s] [term=%d] [err=%v]", snap.OwnerPeerID, snap.Term, err)
-		}
-	}
 }
 
 func pickCandidate(peers []PeerDescriptor, exclude map[string]struct{}, d *daemon) (PeerDescriptor, bool) {
@@ -2107,10 +2738,10 @@ func formatPlanResponse(term uint64, nh, nnh PeerDescriptor) string {
 	)
 }
 
-func formatHistoryResponse(nnh PeerDescriptor) string {
+func formatPickResponse(term uint64, nnh PeerDescriptor) string {
 	return fmt.Sprintf(
-		"OK nnh_id=%s nnh_ip=%s nnh_port=%d nnh_pub=%s",
-		nnh.PeerID, nnh.IP, nnh.DraughtsPort, nnh.PubKey,
+		"OK term=%d nnh_id=%s nnh_ip=%s nnh_port=%d nnh_pub=%s",
+		term, nnh.PeerID, nnh.IP, nnh.DraughtsPort, nnh.PubKey,
 	)
 }
 
@@ -2154,6 +2785,81 @@ func formatNodeSet(ids []string) string {
 		return "{}"
 	}
 	return "{" + strings.Join(cp, ",") + "}"
+}
+
+func persistedViewsToSnapshots(owner string, views []persistedNeighborTermView, ts int64) []NeighborSnapshot {
+	out := make([]NeighborSnapshot, 0, len(views))
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return out
+	}
+	for _, view := range views {
+		if view.Term == 0 {
+			continue
+		}
+		out = append(out, NeighborSnapshot{
+			OwnerPeerID: owner,
+			Term:        view.Term,
+			Active:      clonePeers(view.Active),
+			TimestampMs: ts,
+		})
+	}
+	return out
+}
+
+func normalizeSnapshotsByTerm(snaps []NeighborSnapshot) []NeighborSnapshot {
+	if len(snaps) == 0 {
+		return nil
+	}
+	byTerm := make(map[uint64]NeighborSnapshot, len(snaps))
+	for _, snap := range snaps {
+		if snap.Term == 0 {
+			continue
+		}
+		snap.OwnerPeerID = strings.TrimSpace(snap.OwnerPeerID)
+		snap.Active = clonePeers(snap.Active)
+		old, ok := byTerm[snap.Term]
+		if !ok || old.TimestampMs <= snap.TimestampMs {
+			byTerm[snap.Term] = snap
+		}
+	}
+	terms := make([]uint64, 0, len(byTerm))
+	for term := range byTerm {
+		terms = append(terms, term)
+	}
+	sort.Slice(terms, func(i, j int) bool { return terms[i] < terms[j] })
+	out := make([]NeighborSnapshot, 0, len(terms))
+	for _, term := range terms {
+		out = append(out, byTerm[term])
+	}
+	return out
+}
+
+func formatSnapshotsByTerm(snaps []NeighborSnapshot) string {
+	if len(snaps) == 0 {
+		return "{}"
+	}
+	norm := normalizeSnapshotsByTerm(snaps)
+	if len(norm) == 0 {
+		return "{}"
+	}
+	parts := make([]string, 0, len(norm))
+	for _, snap := range norm {
+		parts = append(parts, fmt.Sprintf("%d:%s", snap.Term, formatNodeSet(peerIDs(snap.Active))))
+	}
+	return "{" + strings.Join(parts, ";") + "}"
+}
+
+func formatExcludeSet(exclude map[string]struct{}) string {
+	ids := make([]string, 0, len(exclude))
+	for id := range exclude {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return formatNodeSet(ids)
 }
 
 func max(a, b int) int {
