@@ -13,6 +13,7 @@ topology/
 # Logs and outputs
 *.log
 *.out
+*.py
 
 # OS files
 .DS_Store

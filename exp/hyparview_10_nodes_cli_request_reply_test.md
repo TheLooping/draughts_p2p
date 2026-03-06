@@ -33,7 +33,7 @@ mkdir -p run/pcap
   --active-max 5 \
   --bind-ip 127.0.0.1 \
   --topod-base 6000 \
-  --log-level detail
+  --log-level info
 ```
 
 ## 4. 启动 tcpdump 抓包（UDP 业务包）

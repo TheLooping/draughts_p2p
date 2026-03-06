@@ -70,7 +70,8 @@ cd ..
   --active-min 3 \
   --active-max 5 \
   --bind-ip 127.0.0.1 \
-  --topod-base 6000
+  --topod-base 6000 \
+  --log-level info
 
 ONLY_8=$(seq 1 8 | sed 's/^/node/' | paste -sd, -)
 ./scripts/run_hyparview_stack.sh \
@@ -144,11 +145,18 @@ TopoDaemon（`config/topod/nodeX.json`）：
 - `active_min`/`active_max`/`passive_max`
 - `bootstrap`（初始可加入目标）
 
+`gen_configs.py` 多机部署常用参数：
+
+- `--bind-ip-map`：按节点索引范围分配不同 `bind_ip`，例如  
+  `1-14:192.168.150.115,15-22:192.168.150.114,23-30:192.168.150.113`
+- `--log-level warn`：降低大规模部署下的日志细节
+
 ## 7. 其他实验文档（`exp/`）
 
 - `exp/hyparview_6_nodes_no_cli_debug.md`
 - `exp/hyparview_10_nodes_cli_request_reply_test.md`
 - `exp/hyparview_50_nodes_test.md`
+- `exp/lan_3_servers_no_cli_deploy.md`
 
 ## 8. 深入设计
 

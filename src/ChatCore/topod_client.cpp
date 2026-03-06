@@ -168,10 +168,10 @@ bool TopodClient::pick_pick_nnh(const std::string& nh_peer_id,
     }
     if (!parse_hop(kv, "nnh", out)) return false;
     resolved_term = parsed_term;
-    logger_.info("topod PICK 结果 nh=" + nh_peer_id +
-                 " req_term=" + std::to_string(term) +
-                 " resolved_term=" + std::to_string(resolved_term) +
-                 " nnh=" + out.peer_id + "@" + out.addr.to_string() + ":" + std::to_string(out.port));
+    logger_.debug("topod PICK 结果 nh=" + nh_peer_id +
+                  " req_term=" + std::to_string(term) +
+                  " resolved_term=" + std::to_string(resolved_term) +
+                  " nnh=" + out.peer_id + "@" + out.addr.to_string() + ":" + std::to_string(out.port));
     return true;
 }
 
@@ -315,9 +315,9 @@ bool TopodClient::query_twohop(TwoHopView& out) const {
         }
     }
     twohop_oss << "}";
-    logger_.info("topod TWOHOP 结果 term=" + std::to_string(view.term) +
-                 " active=" + to_braced_csv(view.active_peer_ids) +
-                 " twohop=" + twohop_oss.str());
+    logger_.debug("topod TWOHOP 结果 term=" + std::to_string(view.term) +
+                  " active=" + to_braced_csv(view.active_peer_ids) +
+                  " twohop=" + twohop_oss.str());
 
     out = std::move(view);
     return true;
@@ -326,7 +326,7 @@ bool TopodClient::query_twohop(TwoHopView& out) const {
 bool TopodClient::exchange(const std::string& request, std::string& response) const {
     if (!enabled()) return false;
     auto start = std::chrono::steady_clock::now();
-    logger_.info("topod IPC 请求开始: socket=" + socket_path_ + " req=\"" + request + "\"");
+    logger_.debug("topod IPC 请求开始: socket=" + socket_path_ + " req=\"" + request + "\"");
     if (socket_path_.size() >= sizeof(sockaddr_un::sun_path)) {
         logger_.warn("topod socket path too long");
         return false;
@@ -387,8 +387,8 @@ bool TopodClient::exchange(const std::string& request, std::string& response) co
     }
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start);
-    logger_.info("topod IPC 请求完成: elapsed=" + std::to_string(elapsed.count()) +
-                 "ms req=\"" + request + "\" resp=\"" + line + "\"");
+    logger_.debug("topod IPC 请求完成: elapsed=" + std::to_string(elapsed.count()) +
+                  "ms req=\"" + request + "\" resp=\"" + line + "\"");
     response = std::move(line);
     return true;
 }

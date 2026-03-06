@@ -47,6 +47,11 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Generate draughts_p2p configs + static topology + keys.")
     p.add_argument("--count", type=int, default=36, help="number of nodes to generate")
     p.add_argument("--bind-ip", default="127.0.0.1", help="IPv4 bind address shared by all nodes")
+    p.add_argument(
+        "--bind-ip-map",
+        default="",
+        help="optional node index mapping, e.g. '1-16:192.168.150.115,17-24:192.168.150.114'",
+    )
     p.add_argument("--overlay-base", type=int, default=4000, help="base overlay port")
     p.add_argument("--draughts-base", type=int, default=5000, help="base draughts port")
     p.add_argument("--topod-base", type=int, default=6000, help="base TopoDaemon port")
@@ -266,6 +271,53 @@ def write_adjacency_matrix(node_ids: List[str], adj: List[Set[int]], out_path: P
     out_path.write_text("\n".join(lines) + "\n")
 
 
+def parse_bind_ip_map(spec: str, count: int, default_ip: str) -> List[str]:
+    out = [default_ip] * count
+    spec = spec.strip()
+    if not spec:
+        return out
+
+    assigned = set()
+    for item in spec.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" not in item:
+            raise SystemExit(f"invalid --bind-ip-map entry (missing ':'): {item}")
+        idx_expr, ip = item.split(":", 1)
+        idx_expr = idx_expr.strip()
+        ip = ip.strip()
+        if not idx_expr or not ip:
+            raise SystemExit(f"invalid --bind-ip-map entry: {item}")
+
+        if "-" in idx_expr:
+            left, right = idx_expr.split("-", 1)
+            try:
+                start = int(left)
+                end = int(right)
+            except ValueError as e:
+                raise SystemExit(f"invalid node range in --bind-ip-map entry: {item}") from e
+        else:
+            try:
+                start = int(idx_expr)
+                end = start
+            except ValueError as e:
+                raise SystemExit(f"invalid node index in --bind-ip-map entry: {item}") from e
+
+        if start <= 0 or end <= 0 or start > end:
+            raise SystemExit(f"invalid node range in --bind-ip-map entry: {item}")
+        if end > count:
+            raise SystemExit(f"node range out of bound in --bind-ip-map entry: {item}; count={count}")
+
+        for idx in range(start, end + 1):
+            if idx in assigned:
+                raise SystemExit(f"overlapped node index in --bind-ip-map: node{idx}")
+            out[idx - 1] = ip
+            assigned.add(idx)
+
+    return out
+
+
 def main() -> None:
     args = parse_args()
     if args.count <= 0:
@@ -302,7 +354,8 @@ def main() -> None:
 
     node_ids = [f"node{i}" for i in range(1, args.count + 1)]
     rng = random.Random(args.seed)
-    topod_addrs = [f"{args.bind_ip}:{args.topod_base + i}" for i in range(args.count)]
+    bind_ips = parse_bind_ip_map(args.bind_ip_map, args.count, args.bind_ip)
+    topod_addrs = [f"{bind_ips[i]}:{args.topod_base + i}" for i in range(args.count)]
     topod_bootstrap = max(1, min(args.topod_bootstrap, args.count))
 
     adjacency = generate_connected_topology(args.count, args.active_min, args.active_max, rng)
@@ -316,6 +369,7 @@ def main() -> None:
         path.write_text("\n".join(neighbors) + "\n")
 
     for i, peer_id in enumerate(node_ids, start=1):
+        bind_ip = bind_ips[i - 1]
         overlay_port = args.overlay_base + (i - 1)
         draughts_port = args.draughts_base + (i - 1)
         topod_addr = topod_addrs[i - 1]
@@ -332,7 +386,7 @@ def main() -> None:
         self_info_file.write_text(
             "\n".join([
                 f"peer_id = {peer_id}",
-                f"bind_ip = {args.bind_ip}",
+                f"bind_ip = {bind_ip}",
                 f"overlay_port = {overlay_port}",
                 f"draughts_port = {draughts_port}",
                 f"pubkey = {pub_b64}",
@@ -343,7 +397,7 @@ def main() -> None:
 
         content = DEFAULT_TEMPLATE.format(
             peer_id=peer_id,
-            bind_ip=args.bind_ip,
+            bind_ip=bind_ip,
             overlay_port=overlay_port,
             draughts_port=draughts_port,
             log_file=log_file.as_posix(),
@@ -393,6 +447,10 @@ def main() -> None:
     print(f"peer info dir: {peer_info_dir}")
     print(f"topology dir: {topology_dir}")
     print(f"adjacency matrix: {topology_dir / 'adjacency_matrix.csv'}")
+    ip_counts = {}
+    for ip in bind_ips:
+        ip_counts[ip] = ip_counts.get(ip, 0) + 1
+    print(f"bind_ip assignment: {ip_counts}")
 
 
 if __name__ == "__main__":

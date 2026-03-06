@@ -621,9 +621,9 @@ void DraughtsApp::on_datagram(const std::array<uint8_t, draughts::kPacketSize>& 
                               const udp::endpoint& from) {
     draughts::DraughtsPacket p{};
     std::memcpy(&p, bytes.data(), draughts::kPacketSize);
-    logger_.info("收到数据包 from=" + peer_label_for(from.address().to_v4(), from.port()) +
-                 " session=" + session_hex_from_packet(p) +
-                 " pk_ph_tmp_is_exit=" + std::string(draughts::is_exit_pk(p.pk_ph_tmp) ? "1" : "0"));
+    logger_.debug("收到数据包 from=" + peer_label_for(from.address().to_v4(), from.port()) +
+                  " session=" + session_hex_from_packet(p) +
+                  " pk_ph_tmp_is_exit=" + std::string(draughts::is_exit_pk(p.pk_ph_tmp) ? "1" : "0"));
     log_packet_cipher_snapshot(logger_, "on_datagram_raw", p);
 
     if (draughts::is_exit_pk(p.pk_ph_tmp)) {
@@ -642,8 +642,8 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
     std::string sid = session_id_from_bytes(p.session_id);
     const std::string sid_hex = session_hex(sid);
     double x = p.params.x;
-    logger_.info("处理exit包 session=" + sid_hex + " x=" + std::to_string(x) +
-                 " from=" + peer_label_for(from.address().to_v4(), from.port()));
+    logger_.debug("处理exit包 session=" + sid_hex + " x=" + std::to_string(x) +
+                  " from=" + peer_label_for(from.address().to_v4(), from.port()));
     log_packet_snapshot(logger_, "handle_exit_packet", p);
 
     if (approx_eq(x, -1.0)) {
@@ -768,8 +768,8 @@ void DraughtsApp::handle_exit_packet(draughts::DraughtsPacket& p, const udp::end
             logger_.warn("next hop info not found for response bootstrap");
             return;
         }
-        logger_.info("response bootstrap: 响应包首跳下一跳候选=" + peer_label_for(nh_addr, nh_port) +
-                     " nh_pub_head=" + pubkey_head(nh_pub));
+        logger_.debug("response bootstrap: 响应包首跳下一跳候选=" + peer_label_for(nh_addr, nh_port) +
+                      " nh_pub_head=" + pubkey_head(nh_pub));
 
         // PICK 的排除节点应为当前节点自身，避免把自己选成 NNH。
         std::string exclude_peer_id = cfg_.peer_id;
@@ -857,10 +857,10 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
     bool response_first_hop = response_flow && (p.params.x < 0.0);
     auto from_desc = node_.lookup_peer_by_draughts_endpoint(from.address().to_v4(), from.port());
     std::string from_peer_id = from_desc ? from_desc->peer_id : "";
-    logger_.info("随机游走解密后 stage=entry from_peer=" + (from_peer_id.empty() ? "unknown" : from_peer_id) +
-                 " response_flow=" + std::string(response_flow ? "1" : "0") +
-                 " response_first_hop=" + std::string(response_first_hop ? "1" : "0") +
-                 " x=" + std::to_string(p.params.x));
+    logger_.debug("随机游走解密后 stage=entry from_peer=" + (from_peer_id.empty() ? "unknown" : from_peer_id) +
+                  " response_flow=" + std::string(response_flow ? "1" : "0") +
+                  " response_first_hop=" + std::string(response_first_hop ? "1" : "0") +
+                  " x=" + std::to_string(p.params.x));
     log_packet_snapshot(logger_, "handle_random_walk_decrypted", p);
 
     if (approx_eq(p.params.x, 0.0)) {
@@ -969,12 +969,12 @@ void DraughtsApp::handle_random_walk(draughts::DraughtsPacket& p, const udp::end
         // Initial request stage always continues path expansion while still updating x.
         do_continue = can_continue && (request_initial_stage || mapped_continue);
     }
-    logger_.info("随机游走决策 can_continue=" + std::string(can_continue ? "1" : "0") +
-                 " do_continue=" + std::string(do_continue ? "1" : "0") +
-                 " request_initial_stage=" + std::string(request_initial_stage ? "1" : "0") +
-                 " response_bootstrap_stage=" + std::string(response_bootstrap_stage ? "1" : "0") +
-                 " x_before=" + std::to_string(x_before) +
-                 " x_after=" + std::to_string(p.params.x));
+    logger_.debug("随机游走决策 can_continue=" + std::string(can_continue ? "1" : "0") +
+                  " do_continue=" + std::string(do_continue ? "1" : "0") +
+                  " request_initial_stage=" + std::string(request_initial_stage ? "1" : "0") +
+                  " response_bootstrap_stage=" + std::string(response_bootstrap_stage ? "1" : "0") +
+                  " x_before=" + std::to_string(x_before) +
+                  " x_after=" + std::to_string(p.params.x));
 
     // PICK 的排除节点应为当前节点自身，避免把自己选成 NNH。
     std::string exclude_peer_id = cfg_.peer_id;
@@ -1257,8 +1257,8 @@ bool DraughtsApp::send_packet_to(const draughts::DraughtsPacket& p,
     std::memcpy(buf->data(), &p, draughts::kPacketSize);
     std::string suffix;
     if (!stage.empty()) suffix = " stage=" + stage;
-    logger_.info("转发数据包给" + peer_label_for(addr, port) + suffix +
-                 " session=" + session_hex_from_packet(p));
+    logger_.debug("转发数据包给" + peer_label_for(addr, port) + suffix +
+                  " session=" + session_hex_from_packet(p));
     sock_.async_send_to(boost::asio::buffer(*buf), ep, [buf](auto, auto) {});
     return true;
 }
@@ -1298,7 +1298,7 @@ bool DraughtsApp::pick_nh_nnh(address_v4& nh_addr,
         logger_.warn("topod disabled; static topology compatibility is removed");
         return false;
     }
-    logger_.info("开始选择路由 stage=pick_nh_nnh exclude_peer_id=" + (exclude_peer_id.empty() ? "none" : exclude_peer_id));
+    logger_.debug("开始选择路由 stage=pick_nh_nnh exclude_peer_id=" + (exclude_peer_id.empty() ? "none" : exclude_peer_id));
     TopodClient::RoutePlan plan{};
     if (!topod_.pick_route(exclude_peer_id, plan)) {
         logger_.warn("topod PLAN query failed");
@@ -1312,11 +1312,11 @@ bool DraughtsApp::pick_nh_nnh(address_v4& nh_addr,
     nnh_pub = plan.nnh.pubkey;
     topo_term = plan.term;
     node_.cache_twohop_neighbor(plan.nh.peer_id, plan.nnh.peer_id);
-    logger_.info("路由选择完成 topo_term=" + std::to_string(topo_term) +
-                 " nh=" + plan.nh.peer_id + "@" + endpoint_to_string(nh_addr, nh_port) +
-                 " nnh=" + plan.nnh.peer_id + "@" + endpoint_to_string(nnh_addr, nnh_port) +
-                 " nh_pub_head=" + pubkey_head(nh_pub) +
-                 " nnh_pub_head=" + pubkey_head(nnh_pub));
+    logger_.debug("路由选择完成 topo_term=" + std::to_string(topo_term) +
+                  " nh=" + plan.nh.peer_id + "@" + endpoint_to_string(nh_addr, nh_port) +
+                  " nnh=" + plan.nnh.peer_id + "@" + endpoint_to_string(nnh_addr, nnh_port) +
+                  " nh_pub_head=" + pubkey_head(nh_pub) +
+                  " nnh_pub_head=" + pubkey_head(nnh_pub));
     return true;
 }
 
@@ -1338,8 +1338,8 @@ bool DraughtsApp::pick_nnh_for_peer_id(const std::string& nh_peer_id,
     if (auto nh_desc = node_.lookup_peer(nh_peer_id); nh_desc && nh_desc->draughts_port != 0) {
         nh_label = nh_desc->peer_id + "@" + endpoint_to_string(addr_from_bytes(nh_desc->ip), nh_desc->draughts_port);
     }
-    logger_.info("根据下一跳" + nh_label + "选择下下跳 term=" + std::to_string(topo_term) +
-                 " exclude=" + (exclude_peer_id.empty() ? "none" : exclude_peer_id));
+    logger_.debug("根据下一跳" + nh_label + "选择下下跳 term=" + std::to_string(topo_term) +
+                  " exclude=" + (exclude_peer_id.empty() ? "none" : exclude_peer_id));
     TopodClient::HopInfo nnh{};
     std::uint64_t resolved_term = topo_term;
     bool ok = topod_.pick_pick_nnh(nh_peer_id, topo_term, exclude_peer_id, resolved_term, nnh);
@@ -1363,9 +1363,9 @@ bool DraughtsApp::pick_nnh_for_peer_id(const std::string& nh_peer_id,
         }
         node_.cache_twohop_neighbor(nh_peer_id, *fallback_nnh_id);
         // PICK 失败时没有新的 term，保持来包 term 不变。
-        logger_.info("根据下一跳" + nh_label + "回退选择下下跳结果=" + *fallback_nnh_id + "@" +
-                     endpoint_to_string(nnh_addr, nnh_port) +
-                     " nnh_pub_head=" + pubkey_head(nnh_pub));
+        logger_.debug("根据下一跳" + nh_label + "回退选择下下跳结果=" + *fallback_nnh_id + "@" +
+                      endpoint_to_string(nnh_addr, nnh_port) +
+                      " nnh_pub_head=" + pubkey_head(nnh_pub));
         return true;
     }
     topo_term = resolved_term;
@@ -1373,9 +1373,9 @@ bool DraughtsApp::pick_nnh_for_peer_id(const std::string& nh_peer_id,
     nnh_port = nnh.port;
     nnh_pub = nnh.pubkey;
     node_.cache_twohop_neighbor(nh_peer_id, nnh.peer_id);
-    logger_.info("根据下一跳" + nh_label + "选择下下跳结果=" + nnh.peer_id + "@" +
-                 endpoint_to_string(nnh_addr, nnh_port) +
-                 " nnh_pub_head=" + pubkey_head(nnh_pub));
+    logger_.debug("根据下一跳" + nh_label + "选择下下跳结果=" + nnh.peer_id + "@" +
+                  endpoint_to_string(nnh_addr, nnh_port) +
+                  " nnh_pub_head=" + pubkey_head(nnh_pub));
     return true;
 }
 
