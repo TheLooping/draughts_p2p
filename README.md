@@ -104,6 +104,43 @@ CLI 验证：
 - 在 `node10`：`inbox`、`requests`、`reply <session_hex> ack`
 - 回到 `node9`：`inbox`
 
+### 4.1 跨机器快速加入（自动本机 IP + 空闲端口）
+
+新增脚本：`scripts/join_node.py`
+
+- 默认引导节点读取 `config/bootstrap_seeds.conf`（项目内固定种子）
+- 自动探测本机 IPv4
+- 自动在给定范围挑选空闲端口
+- 可一键启动 `CLI` 或 `非CLI` 节点
+
+先确认固定种子（可按需修改）：
+
+```bash
+cat config/bootstrap_seeds.conf
+```
+
+非 CLI 加入（后台运行）：
+
+```bash
+cd /home/seanet/draughts_p2p
+./scripts/join_node.py --peer-id node114_nc_1
+```
+
+CLI 加入（前台交互）：
+
+```bash
+cd /home/seanet/draughts_p2p
+./scripts/join_node.py --peer-id node117_cli_1 --cli
+```
+
+若本次要临时指定不同引导地址，可覆盖：
+
+```bash
+./scripts/join_node.py \
+  --peer-id node_tmp \
+  --bootstrap 192.168.150.115:6000,192.168.150.115:6001,192.168.150.115:6002
+```
+
 ## 5. 运行时接口
 
 ### 5.1 ChatCore CLI
